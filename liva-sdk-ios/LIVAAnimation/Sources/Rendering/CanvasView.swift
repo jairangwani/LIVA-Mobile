@@ -1,0 +1,425 @@
+//
+//  CanvasView.swift
+//  LIVAAnimation
+//
+//  High-performance canvas view for avatar animation rendering.
+//
+
+import UIKit
+
+/// Canvas view for rendering LIVA avatar animations
+public class LIVACanvasView: UIView {
+
+    // MARK: - Properties
+
+    /// Animation engine that provides frames
+    weak var animationEngine: AnimationEngine?
+
+    /// Base frame manager for idle animations
+    private weak var baseFrameManager: BaseFrameManager?
+
+    /// Current base frame image
+    private var baseFrame: UIImage?
+
+    /// Current overlay frame image
+    private var overlayFrame: UIImage?
+
+    /// Overlay position (where to draw mouth/lips)
+    private var overlayPosition: CGPoint = .zero
+
+    /// Display link for render loop
+    private var displayLink: CADisplayLink?
+
+    /// Whether rendering is active
+    private var isRendering = false
+
+    /// Scale factor for content
+    private var contentScale: CGFloat = 1.0
+
+    /// Content size (for aspect fit)
+    private var contentSize: CGSize = .zero
+
+    /// Content offset (for centering)
+    private var contentOffset: CGPoint = .zero
+
+    // MARK: - Performance
+
+    /// Metal layer for hardware acceleration (iOS 13+)
+    private var metalLayer: CAMetalLayer?
+
+    /// Use Core Animation for compositing
+    private var baseImageLayer: CALayer?
+    private var overlayImageLayer: CALayer?
+
+    // MARK: - Feathered Overlay
+
+    /// Inner radius for feather (as fraction of min dimension)
+    private let featherInner: CGFloat = 0.4
+    /// Outer radius for feather (as fraction of min dimension)
+    private let featherOuter: CGFloat = 0.5
+    /// Cached feathered overlay image
+    private var cachedFeatheredOverlay: UIImage?
+    private var cachedOverlaySize: CGSize = .zero
+
+    // MARK: - Debug
+
+    /// Show debug overlay
+    public var showDebugInfo: Bool = false
+
+    /// Frame counter for FPS calculation
+    private var frameCount = 0
+    private var lastFPSTime: CFTimeInterval = 0
+    private var currentFPS: Double = 0
+
+    // MARK: - Initialization
+
+    public override init(frame: CGRect) {
+        super.init(frame: frame)
+        setupView()
+    }
+
+    public required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+
+    private func setupView() {
+        backgroundColor = .clear
+        contentMode = .scaleAspectFit
+        isOpaque = false
+        clipsToBounds = true
+
+        // Set up layer-based rendering for better performance
+        setupLayers()
+    }
+
+    private func setupLayers() {
+        // Base image layer
+        baseImageLayer = CALayer()
+        baseImageLayer?.contentsGravity = .resizeAspect
+        baseImageLayer?.contentsScale = UIScreen.main.scale
+        layer.addSublayer(baseImageLayer!)
+
+        // Overlay image layer (lip sync)
+        overlayImageLayer = CALayer()
+        overlayImageLayer?.contentsGravity = .resizeAspect
+        overlayImageLayer?.contentsScale = UIScreen.main.scale
+        layer.addSublayer(overlayImageLayer!)
+    }
+
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+        updateContentLayout()
+    }
+
+    private func updateContentLayout() {
+        guard let baseImage = baseFrame else {
+            baseImageLayer?.frame = bounds
+            overlayImageLayer?.frame = bounds
+            return
+        }
+
+        // Calculate aspect-fit scaling
+        let imageSize = baseImage.size
+        let viewSize = bounds.size
+
+        let widthRatio = viewSize.width / imageSize.width
+        let heightRatio = viewSize.height / imageSize.height
+        contentScale = min(widthRatio, heightRatio)
+
+        contentSize = CGSize(
+            width: imageSize.width * contentScale,
+            height: imageSize.height * contentScale
+        )
+
+        contentOffset = CGPoint(
+            x: (viewSize.width - contentSize.width) / 2,
+            y: (viewSize.height - contentSize.height) / 2
+        )
+
+        // Update base layer frame
+        baseImageLayer?.frame = CGRect(
+            origin: contentOffset,
+            size: contentSize
+        )
+    }
+
+    // MARK: - Rendering
+
+    public override func draw(_ rect: CGRect) {
+        guard !useLayerRendering else { return }
+
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+
+        // Clear the context
+        context.clear(rect)
+
+        // Draw base frame (aspect fit)
+        if let base = baseFrame {
+            let imageSize = base.size
+            let widthRatio = rect.width / imageSize.width
+            let heightRatio = rect.height / imageSize.height
+            let scale = min(widthRatio, heightRatio)
+
+            let scaledSize = CGSize(
+                width: imageSize.width * scale,
+                height: imageSize.height * scale
+            )
+
+            let x = (rect.width - scaledSize.width) / 2
+            let y = (rect.height - scaledSize.height) / 2
+
+            base.draw(in: CGRect(x: x, y: y, width: scaledSize.width, height: scaledSize.height))
+
+            // Draw overlay at scaled position
+            if let overlay = overlayFrame {
+                let scaledX = x + overlayPosition.x * scale
+                let scaledY = y + overlayPosition.y * scale
+                let overlayScaledSize = CGSize(
+                    width: overlay.size.width * scale,
+                    height: overlay.size.height * scale
+                )
+
+                overlay.draw(in: CGRect(
+                    x: scaledX,
+                    y: scaledY,
+                    width: overlayScaledSize.width,
+                    height: overlayScaledSize.height
+                ))
+            }
+        }
+
+        // Draw debug info if enabled
+        if showDebugInfo {
+            drawDebugInfo(in: context, rect: rect)
+        }
+    }
+
+    /// Use layer-based rendering (more efficient)
+    private var useLayerRendering: Bool = true
+
+    private func renderWithLayers() {
+        // Update base layer
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        if let base = baseFrame {
+            baseImageLayer?.contents = base.cgImage
+            baseImageLayer?.frame = CGRect(origin: contentOffset, size: contentSize)
+        }
+
+        // Update overlay layer with feathered edges
+        if let overlay = overlayFrame {
+            overlayImageLayer?.isHidden = false
+
+            let scaledPosition = CGPoint(
+                x: contentOffset.x + overlayPosition.x * contentScale,
+                y: contentOffset.y + overlayPosition.y * contentScale
+            )
+
+            let overlayScaledSize = CGSize(
+                width: overlay.size.width * contentScale,
+                height: overlay.size.height * contentScale
+            )
+
+            // Apply feathered mask to overlay
+            let featheredOverlay = createFeatheredOverlay(overlay)
+            overlayImageLayer?.contents = featheredOverlay?.cgImage
+            overlayImageLayer?.frame = CGRect(origin: scaledPosition, size: overlayScaledSize)
+        } else {
+            overlayImageLayer?.isHidden = true
+        }
+
+        CATransaction.commit()
+    }
+
+    // MARK: - Feathered Overlay Rendering
+
+    /// Creates a feathered overlay image with radial gradient mask
+    private func createFeatheredOverlay(_ overlay: UIImage) -> UIImage? {
+        let size = overlay.size
+        guard size.width > 0 && size.height > 0 else { return overlay }
+
+        // Check cache - if same size, skip recreation
+        if cachedOverlaySize == size, let cached = cachedFeatheredOverlay {
+            // Still need to apply to new image, but can reuse gradient calculation approach
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let feathered = renderer.image { context in
+            let cgContext = context.cgContext
+            let rect = CGRect(origin: .zero, size: size)
+
+            // Draw the overlay image
+            overlay.draw(in: rect)
+
+            // Create radial gradient mask for feathering
+            let cx = size.width / 2
+            let cy = size.height / 2
+            let minDim = min(size.width, size.height)
+            let innerRadius = minDim * featherInner
+            let outerRadius = minDim * featherOuter
+
+            // Apply mask using destination-out (erase edges)
+            cgContext.saveGState()
+            cgContext.setBlendMode(.destinationOut)
+
+            // Create radial gradient - transparent center, opaque edges
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let colors: [CGColor] = [
+                UIColor(white: 0, alpha: 0).cgColor,      // Center: transparent
+                UIColor(white: 0, alpha: 0.95).cgColor    // Edge: mostly opaque
+            ]
+            let locations: [CGFloat] = [0, 1]
+
+            if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors as CFArray, locations: locations) {
+                cgContext.drawRadialGradient(
+                    gradient,
+                    startCenter: CGPoint(x: cx, y: cy),
+                    startRadius: innerRadius,
+                    endCenter: CGPoint(x: cx, y: cy),
+                    endRadius: outerRadius,
+                    options: [.drawsAfterEndLocation]
+                )
+            }
+
+            cgContext.restoreGState()
+        }
+
+        cachedOverlaySize = size
+        return feathered
+    }
+
+    private func drawDebugInfo(in context: CGContext, rect: CGRect) {
+        let debugText = String(format: "FPS: %.1f | Frames: %d", currentFPS, animationEngine?.queuedFrameCount ?? 0)
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: UIColor.white
+        ]
+
+        // Draw background
+        context.setFillColor(UIColor.black.withAlphaComponent(0.5).cgColor)
+        context.fill(CGRect(x: 8, y: 8, width: 120, height: 20))
+
+        // Draw text
+        (debugText as NSString).draw(
+            at: CGPoint(x: 12, y: 10),
+            withAttributes: attributes
+        )
+    }
+
+    // MARK: - Frame Updates
+
+    /// Update the base frame
+    func setBaseFrame(_ image: UIImage?) {
+        baseFrame = image
+        if useLayerRendering {
+            updateContentLayout()
+            renderWithLayers()
+        } else {
+            setNeedsDisplay()
+        }
+    }
+
+    /// Update the overlay frame
+    func setOverlayFrame(_ image: UIImage?, at position: CGPoint) {
+        overlayFrame = image
+        overlayPosition = position
+        if useLayerRendering {
+            renderWithLayers()
+        } else {
+            setNeedsDisplay()
+        }
+    }
+
+    /// Set the base frame manager for idle animations
+    func setBaseFrameManager(_ manager: BaseFrameManager?) {
+        baseFrameManager = manager
+
+        // Show first idle frame immediately if available
+        if let firstFrame = manager?.getCurrentIdleFrame() {
+            setBaseFrame(firstFrame)
+        }
+    }
+
+    // MARK: - Display Link
+
+    /// Start the render loop
+    func startRenderLoop() {
+        guard displayLink == nil else { return }
+
+        isRendering = true
+        displayLink = CADisplayLink(target: self, selector: #selector(renderFrame))
+
+        // Request 60fps but the animation engine controls actual frame rate
+        if #available(iOS 15.0, *) {
+            displayLink?.preferredFrameRateRange = CAFrameRateRange(
+                minimum: 30,
+                maximum: 60,
+                preferred: 60
+            )
+        } else {
+            displayLink?.preferredFramesPerSecond = 60
+        }
+
+        displayLink?.add(to: .main, forMode: .common)
+        lastFPSTime = CACurrentMediaTime()
+    }
+
+    /// Stop the render loop
+    func stopRenderLoop() {
+        isRendering = false
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    @objc private func renderFrame(_ displayLink: CADisplayLink) {
+        // Update FPS counter
+        frameCount += 1
+        let currentTime = CACurrentMediaTime()
+        if currentTime - lastFPSTime >= 1.0 {
+            currentFPS = Double(frameCount) / (currentTime - lastFPSTime)
+            frameCount = 0
+            lastFPSTime = currentTime
+        }
+
+        // Get next frame from animation engine
+        guard let engine = animationEngine,
+              let frame = engine.getNextFrame() else {
+            return
+        }
+
+        // Update frames
+        baseFrame = frame.baseImage
+        overlayFrame = frame.overlayImage
+        overlayPosition = frame.overlayPosition
+
+        // Render
+        if useLayerRendering {
+            renderWithLayers()
+        } else {
+            setNeedsDisplay()
+        }
+    }
+
+    // MARK: - Cleanup
+
+    deinit {
+        stopRenderLoop()
+    }
+}
+
+// MARK: - Public Interface
+
+public extension LIVACanvasView {
+    /// Current FPS
+    var fps: Double {
+        return currentFPS
+    }
+
+    /// Whether currently rendering
+    var isActive: Bool {
+        return isRendering
+    }
+}
