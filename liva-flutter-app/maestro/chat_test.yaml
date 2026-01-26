@@ -1,0 +1,47 @@
+appId: com.liva.livaApp
+---
+# Test chat and message sending
+
+- waitForAnimationToEnd
+- takeScreenshot: screenshots/chat_01_agent
+
+# Tap on chat icon (top right)
+- tapOn:
+    id: "chat_icon"
+    optional: true
+
+- waitForAnimationToEnd
+
+# If id doesn't work, try the icon
+- tapOn:
+    text: "Go to Chat"
+    optional: true
+
+- waitForAnimationToEnd
+- takeScreenshot: screenshots/chat_02_after_tap
+
+# Type message
+- tapOn:
+    text: "Type a message..."
+    optional: true
+
+- waitForAnimationToEnd
+
+- inputText: "Hello Anna"
+
+- takeScreenshot: screenshots/chat_03_typed
+
+# Tap send button (right side)
+- tapOn:
+    point: "92%,95%"
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/chat_04_sent
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/chat_05_final

@@ -19,8 +19,24 @@ class LIVAImageCache {
     /// Track which images belong to which chunk for batch eviction
     private var chunkImageKeys: [Int: Set<String>] = [:]
 
-    /// Lock for thread-safe access
+    /// Lock for thread-safe access (minimal locking for cache operations)
     private let lock = NSLock()
+
+    // MARK: - Background Processing (Performance Optimization)
+
+    /// Background queue for Base64 decoding and UIImage creation
+    /// This prevents blocking the main/render thread when new chunks arrive
+    private let processingQueue = DispatchQueue(
+        label: "com.liva.imageProcessing",
+        qos: .userInitiated,
+        attributes: .concurrent  // Allow parallel decoding of multiple frames
+    )
+
+    /// Track pending operations per chunk for batch completion tracking
+    private var pendingOperations: [Int: Int] = [:]
+
+    /// Callbacks when all images for a chunk are processed
+    private var chunkCompletionCallbacks: [Int: () -> Void] = [:]
 
     // MARK: - Constants
 
@@ -50,16 +66,130 @@ class LIVAImageCache {
         NotificationCenter.default.removeObserver(self)
     }
 
-    // MARK: - Public Methods
+    // MARK: - Async Processing (Non-blocking)
 
-    /// Set image in cache with chunk tracking
+    /// Process and cache image data asynchronously (NON-BLOCKING)
+    /// This moves Base64 decoding and UIImage creation to background thread
+    /// to prevent FPS drops when new chunks arrive during playback
+    /// - Parameters:
+    ///   - base64Data: Base64 encoded image string
+    ///   - key: Cache key (format: "chunkIndex-sectionIndex-sequenceIndex")
+    ///   - chunkIndex: Chunk index for batch tracking
+    ///   - completion: Optional callback when image is cached (called on main queue)
+    func processAndCacheAsync(
+        base64Data: String,
+        key: String,
+        chunkIndex: Int,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        // Increment pending count for this chunk
+        lock.lock()
+        pendingOperations[chunkIndex, default: 0] += 1
+        lock.unlock()
+
+        // Process on background queue (non-blocking!)
+        let startTime = CACurrentMediaTime()
+        processingQueue.async { [weak self] in
+            guard let self = self else {
+                completion?(false)
+                return
+            }
+
+            let decodeStart = CACurrentMediaTime()
+
+            // Base64 decode on background thread (previously blocking main thread)
+            guard let data = Data(base64Encoded: base64Data) else {
+                self.decrementPendingAndNotify(chunkIndex: chunkIndex)
+                completion?(false)
+                return
+            }
+
+            let base64Time = CACurrentMediaTime() - decodeStart
+            let imageStart = CACurrentMediaTime()
+
+            // UIImage creation on background thread (previously blocking main thread)
+            guard let image = UIImage(data: data) else {
+                self.decrementPendingAndNotify(chunkIndex: chunkIndex)
+                completion?(false)
+                return
+            }
+
+            let imageTime = CACurrentMediaTime() - imageStart
+            let totalTime = CACurrentMediaTime() - startTime
+
+            // Log slow processing (> 10ms)
+            if totalTime > 0.010 {
+                print("[LIVAImageCache] ⏱️ Slow async process: key=\(key) total=\(String(format: "%.1f", totalTime * 1000))ms (base64=\(String(format: "%.1f", base64Time * 1000))ms, image=\(String(format: "%.1f", imageTime * 1000))ms)")
+            }
+
+            // Store in cache (fast - minimal lock time)
+            self.setImageInternal(image, forKey: key, chunkIndex: chunkIndex)
+
+            // Decrement pending and check if chunk is complete
+            self.decrementPendingAndNotify(chunkIndex: chunkIndex)
+
+            // Call completion on main queue
+            if let completion = completion {
+                DispatchQueue.main.async {
+                    completion(true)
+                }
+            }
+        }
+    }
+
+    /// Decrement pending operations and trigger callback if chunk is complete
+    private func decrementPendingAndNotify(chunkIndex: Int) {
+        lock.lock()
+        pendingOperations[chunkIndex, default: 1] -= 1
+        let remaining = pendingOperations[chunkIndex] ?? 0
+        let callback = remaining == 0 ? chunkCompletionCallbacks.removeValue(forKey: chunkIndex) : nil
+        lock.unlock()
+
+        // Trigger callback on main queue if chunk is complete
+        if let callback = callback {
+            DispatchQueue.main.async { callback() }
+        }
+    }
+
+    /// Register callback when all images for a chunk are processed
+    /// - Parameters:
+    ///   - chunkIndex: Chunk index to monitor
+    ///   - callback: Called when all images for this chunk are cached
+    func onChunkComplete(chunkIndex: Int, callback: @escaping () -> Void) {
+        lock.lock()
+        let pending = pendingOperations[chunkIndex, default: 0]
+        if pending == 0 {
+            // Already complete
+            lock.unlock()
+            DispatchQueue.main.async { callback() }
+        } else {
+            chunkCompletionCallbacks[chunkIndex] = callback
+            lock.unlock()
+        }
+    }
+
+    // MARK: - Public Methods (Synchronous - for compatibility)
+
+    /// Set image in cache with chunk tracking (synchronous version)
+    /// Use processAndCacheAsync() for better performance when processing incoming frames
     /// - Parameters:
     ///   - image: Image to cache
-    ///   - key: Unique key (format: "chunkIndex_sectionIndex_sequenceIndex")
+    ///   - key: Unique key (format: "chunkIndex-sectionIndex-sequenceIndex")
     ///   - chunkIndex: Chunk index for batch eviction
     func setImage(_ image: UIImage, forKey key: String, chunkIndex: Int) {
+        setImageInternal(image, forKey: key, chunkIndex: chunkIndex)
+    }
+
+    /// Internal method to set image (called from both sync and async paths)
+    private func setImageInternal(_ image: UIImage, forKey key: String, chunkIndex: Int) {
         lock.lock()
         defer { lock.unlock() }
+
+        // Check if key already exists (potential overwrite issue)
+        let existingImage = cache.object(forKey: key as NSString)
+        if existingImage != nil {
+            print("[LIVAImageCache] ⚠️ OVERWRITING existing image at key: \(key), chunk: \(chunkIndex)")
+        }
 
         // Track which chunk this image belongs to
         if chunkImageKeys[chunkIndex] == nil {
@@ -75,8 +205,8 @@ class LIVAImageCache {
 
         // Log first few cached images to debug key format
         let totalImages = chunkImageKeys.values.reduce(0) { $0 + $1.count }
-        if totalImages <= 5 {
-            print("[LIVAImageCache] Cached image: \(key), chunk: \(chunkIndex), total: \(totalImages)")
+        if totalImages <= 10 {
+            print("[LIVAImageCache] ✅ Cached image: \(key), chunk: \(chunkIndex), size: \(image.size), total: \(totalImages)")
         }
     }
 

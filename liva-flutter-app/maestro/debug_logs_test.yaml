@@ -1,0 +1,68 @@
+appId: com.liva.livaApp
+---
+# Test that opens debug logs panel after sending message
+
+- launchApp:
+    clearState: true
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+# Navigate to chat
+- tapOn:
+    text: "Go to Chat"
+    optional: true
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+# Wait for base frames to load
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+# Tap the input field
+- tapOn:
+    text: "Type a message..."
+
+- waitForAnimationToEnd
+
+# Dismiss keyboard tutorial
+- tapOn:
+    text: "Continue"
+    optional: true
+
+- waitForAnimationToEnd
+
+# Type message
+- inputText: "Hi"
+
+# Tap send button
+- tapOn:
+    point: "90%,54%"
+
+# Wait for response
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/debug_01_after_response
+
+# Tap the debug logs icon (document icon in app bar)
+- tapOn:
+    id: "article_outlined"
+    optional: true
+
+- waitForAnimationToEnd
+
+# If that didn't work, try tapping by position (4th icon from right)
+- tapOn:
+    point: "78%,6%"
+    optional: true
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/debug_02_logs_panel

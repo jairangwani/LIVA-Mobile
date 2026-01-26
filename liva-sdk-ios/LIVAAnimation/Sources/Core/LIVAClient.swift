@@ -122,8 +122,9 @@ public final class LIVAClient {
 
         // NEW - Initialize new animation engine with canvas view
         newAnimationEngine = LIVAAnimationEngine(canvasView: view)
+        newAnimationEngine?.delegate = self  // Set delegate for audio-animation sync
 
-        clientLog("[LIVAClient] ✅ Attached canvas view and initialized new animation engine")
+        clientLog("[LIVAClient] ✅ Attached canvas view and initialized new animation engine with audio sync")
     }
 
     /// Connect to the backend server
@@ -187,7 +188,8 @@ public final class LIVAClient {
 
         socket.onConnect = { [weak self] in
             self?.state = .connected
-            self?.canvasView?.startRenderLoop()
+            // NOTE: Don't start legacy canvas render loop - new animation engine handles rendering
+            // self?.canvasView?.startRenderLoop()
 
             // Request animations manifest to start loading base frames
             if let agentId = self?.configuration?.agentId {
@@ -289,8 +291,10 @@ public final class LIVAClient {
 
         clientLog("[LIVAClient] 🔊 Received audio chunk \(audioChunk.chunkIndex), animationFramesChunk count: \(audioChunk.animationFramesChunk.count)")
 
-        // Queue audio for playback
-        audioPlayer?.queueAudio(audioChunk.audioData, chunkIndex: audioChunk.chunkIndex)
+        // AUDIO-ANIMATION SYNC FIX:
+        // DON'T play audio immediately - queue it for animation engine to trigger
+        // Audio will start when first overlay frame renders (like web frontend)
+        newAnimationEngine?.queueAudioForChunk(chunkIndex: audioChunk.chunkIndex, audioData: audioChunk.audioData)
 
         // Store overlay position for this chunk
         if let firstFrame = audioChunk.animationFramesChunk.first {
@@ -313,35 +317,34 @@ public final class LIVAClient {
         }
 
         // Process each frame for the NEW animation engine (overlay rendering)
+        // PERFORMANCE FIX: Use async processing to avoid blocking render thread
         for (index, frame) in frameBatch.frames.enumerated() {
-            // Decode base64 image
             let imageDataString = frame.imageData
-            clientLog("[LIVAClient] 📥 Frame \(index): imageData length=\(imageDataString.count), animationName=\(frame.animationName)")
 
-            guard let imageData = Data(base64Encoded: imageDataString) else {
-                clientLog("[LIVAClient] ⚠️ Failed to decode base64 for frame \(index)")
-                continue
-            }
-
-            guard let image = UIImage(data: imageData) else {
-                clientLog("[LIVAClient] ⚠️ Failed to create UIImage from data for frame \(index), data size=\(imageData.count)")
-                continue
-            }
-
-            // Cache for overlay playback using web app's key format
-            // NOTE: Backend sends section_index in frame data - use 0 to match what isFirstOverlayFrameReady expects
+            // CRITICAL FIX: Use array index (position in batch) for cache key, NOT backend's sequence_index
+            // Web frontend does the same: uses loop index when storing, state.currentDrawingFrame when retrieving
+            // This ensures cache keys match during playback: store at "0_0_0", "0_0_1", "0_0_2"...
+            // Retrieve at array position 0, 1, 2... which generates same keys
+            let frameIndexInChunk = (pendingOverlayFrames[chunkIndex]?.count ?? 0)
             let key = getOverlayKey(
                 chunkIndex: chunkIndex,
                 sectionIndex: 0, // Always use 0 to match overlay section lookup
-                sequenceIndex: frame.sequenceIndex
+                sequenceIndex: frameIndexInChunk  // Use array position, NOT frame.sequenceIndex!
             )
 
-            newAnimationEngine?.cacheOverlayImage(image, forKey: key, chunkIndex: chunkIndex)
-
-            // Verify cache worked
-            if frame.sequenceIndex == 0 {
-                let wasStored = newAnimationEngine?.getOverlayImage(forKey: key) != nil
-                clientLog("[LIVAClient] 🔑 Cached first frame key=\(key), verified=\(wasStored)")
+            // ASYNC PROCESSING: Decode Base64 and create UIImage on background thread
+            // This prevents FPS drops when new chunks arrive during playback
+            let sequenceIndex = frame.sequenceIndex
+            newAnimationEngine?.processAndCacheOverlayImageAsync(
+                base64Data: imageDataString,
+                key: key,
+                chunkIndex: chunkIndex
+            ) { success in
+                if !success {
+                    clientLog("[LIVAClient] ⚠️ Failed to process frame \(index) for chunk \(chunkIndex)")
+                } else if sequenceIndex == 0 {
+                    clientLog("[LIVAClient] ✅ Async cached first frame: \(key)")
+                }
             }
 
             // Track animation name for this chunk
@@ -355,7 +358,7 @@ public final class LIVAClient {
                 matchedSpriteFrameNumber: frame.matchedSpriteFrameNumber,
                 sheetFilename: frame.sheetFilename,
                 coordinates: .zero, // Will be set from overlay position
-                imageData: nil, // Already cached separately
+                imageData: nil, // Already cached separately (async)
                 sequenceIndex: frame.sequenceIndex,
                 animationName: frame.animationName,
                 originalFrameIndex: frame.frameIndex,
@@ -364,11 +367,6 @@ public final class LIVAClient {
                 viseme: nil
             )
             pendingOverlayFrames[chunkIndex]?.append(overlayFrame)
-
-            // Log first frame of each chunk
-            if frame.sequenceIndex == 0 {
-                clientLog("[LIVAClient] 📷 Cached first overlay frame for chunk \(chunkIndex), matched_sprite: \(frame.matchedSpriteFrameNumber)")
-            }
         }
 
         // Also store for legacy engine (old path)
@@ -678,7 +676,8 @@ public final class LIVAClient {
         baseFrameManager?.onFirstIdleFrameReady = { [weak self] in
             // First idle frame received - can start showing avatar
             self?.canvasView?.setBaseFrameManager(self?.baseFrameManager)
-            self?.canvasView?.startRenderLoop()
+            // NOTE: Don't start legacy canvas render loop - new animation engine handles rendering
+            // self?.canvasView?.startRenderLoop()
         }
     }
 
@@ -752,5 +751,61 @@ public extension LIVAClient {
     /// Get array of debug log entries
     func getDebugLogEntries() -> [String] {
         return LIVADebugLog.shared.getLogs()
+    }
+
+    /// Get real-time animation debug info for Flutter display
+    func getAnimationDebugInfo() -> [String: Any] {
+        // Use new animation engine info if available
+        if let engineInfo = newAnimationEngine?.getDebugInfo() {
+            var info = engineInfo
+            info["state"] = stateToString(state)
+            info["isConnected"] = isConnected
+            return info
+        }
+
+        // Fallback with basic state info
+        return [
+            "fps": 0.0,
+            "animationName": "unknown",
+            "frameNumber": 0,
+            "totalFrames": 0,
+            "mode": "idle",
+            "hasOverlay": false,
+            "state": stateToString(state),
+            "isConnected": isConnected
+        ]
+    }
+
+    /// Convert state to string for debug info
+    private func stateToString(_ state: LIVAState) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .animating: return "animating"
+        case .error: return "error"
+        }
+    }
+}
+
+// MARK: - LIVAAnimationEngineDelegate
+
+extension LIVAClient: LIVAAnimationEngineDelegate {
+    /// Called when animation engine wants to start audio for a chunk (synced with animation)
+    func animationEngine(_ engine: LIVAAnimationEngine, playAudioData data: Data, forChunk chunkIndex: Int) {
+        // Play audio NOW - this is called exactly when the first overlay frame renders
+        // Perfect lip sync: audio and animation start together
+        audioPlayer?.queueAudio(data, chunkIndex: chunkIndex)
+        clientLog("[LIVAClient] 🔊 Playing audio for chunk \(chunkIndex) - synced with animation")
+    }
+
+    /// Called when all overlay chunks have finished playing
+    func animationEngineDidFinishAllChunks(_ engine: LIVAAnimationEngine) {
+        clientLog("[LIVAClient] ✅ All overlay chunks complete - transitioning to idle")
+
+        // Update state to connected (not animating anymore)
+        if state == .animating {
+            state = .connected
+        }
     }
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -6,6 +8,25 @@ import '../../../platform/liva_animation.dart';
 import '../providers/chat_provider.dart';
 import '../widgets/message_input.dart';
 import '../widgets/message_list.dart';
+
+/// Real-time animation debug info from native SDK
+class AnimationDebugInfo {
+  final double fps;
+  final String animationName;
+  final int frameNumber;
+  final int totalFrames;
+  final String mode;
+  final bool hasOverlay;
+
+  const AnimationDebugInfo({
+    this.fps = 0.0,
+    this.animationName = 'idle_1_s_idle_1_e',
+    this.frameNumber = 0,
+    this.totalFrames = 0,
+    this.mode = 'idle',
+    this.hasOverlay = false,
+  });
+}
 
 /// Main chat screen with LIVA avatar animation.
 class ChatScreen extends ConsumerStatefulWidget {
@@ -17,8 +38,12 @@ class ChatScreen extends ConsumerStatefulWidget {
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _textController = TextEditingController();
-  bool _showDebug = false;
+  bool _showDebug = true; // Show debug by default for testing
   bool _isInitialized = false;
+
+  // Real-time animation debug info
+  AnimationDebugInfo _animDebugInfo = const AnimationDebugInfo();
+  Timer? _debugInfoTimer;
 
   @override
   void initState() {
@@ -27,6 +52,39 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeAnimation();
     });
+
+    // Set up debug info callback
+    LIVAAnimation.onDebugInfo = _handleDebugInfo;
+
+    // Poll debug info at 30fps for real-time display
+    _debugInfoTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+      _pollDebugInfo();
+    });
+  }
+
+  void _handleDebugInfo(Map<String, dynamic> info) {
+    if (mounted) {
+      setState(() {
+        _animDebugInfo = AnimationDebugInfo(
+          fps: (info['fps'] as num?)?.toDouble() ?? 0.0,
+          animationName: info['animationName'] as String? ?? 'unknown',
+          frameNumber: info['frameNumber'] as int? ?? 0,
+          totalFrames: info['totalFrames'] as int? ?? 0,
+          mode: info['mode'] as String? ?? 'idle',
+          hasOverlay: info['hasOverlay'] as bool? ?? false,
+        );
+      });
+    }
+  }
+
+  Future<void> _pollDebugInfo() async {
+    if (!_isInitialized) return;
+    try {
+      final info = await LIVAAnimation.debugInfo;
+      _handleDebugInfo(info);
+    } catch (e) {
+      // Ignore polling errors
+    }
   }
 
   Future<void> _initializeAnimation() async {
@@ -62,7 +120,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   @override
   void dispose() {
+    _debugInfoTimer?.cancel();
     _textController.dispose();
+    LIVAAnimation.onDebugInfo = null;
     LIVAAnimation.disconnect();
     super.dispose();
   }
@@ -156,18 +216,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Widget _buildPortraitLayout(ChatState chatState) {
     return Column(
       children: [
-        // Animation canvas (top half)
+        // Animation canvas (70% of screen height - larger avatar)
         Expanded(
-          flex: 2,
+          flex: 7, // 70% of screen
           child: _buildAnimationCanvas(),
         ),
 
         // Divider
         const Divider(height: 1),
 
-        // Messages and input (bottom half)
+        // Messages and input (30% - compact)
         Expanded(
-          flex: 3,
+          flex: 3, // 30% of screen
           child: Column(
             children: [
               Expanded(
@@ -224,101 +284,217 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       color: Colors.black,
       child: Stack(
         children: [
-          // Main animation view
-          Center(
-            child: AspectRatio(
-              aspectRatio: 1.0,
-              child: LIVAAnimationView(
-                key: const Key('avatar_canvas'),
-                showDebugOverlay: _showDebug,
-                loadingWidget: const Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    CircularProgressIndicator(color: Colors.white),
-                    SizedBox(height: 16),
-                    Text(
-                      'Connecting...',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                  ],
-                ),
-                errorBuilder: (error) => Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(
-                      Icons.error_outline,
-                      color: Colors.red,
-                      size: 48,
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      error,
-                      style: const TextStyle(color: Colors.white),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: _reconnect,
-                      child: const Text('Reconnect'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+          // Main animation view - fill width, crop sides if needed
+          // Using LayoutBuilder to calculate proper sizing
+          LayoutBuilder(
+            builder: (context, constraints) {
+              // Calculate size to fill width and show full height
+              // Avatar is 1:1 aspect ratio, so width = height
+              // We want to fill the container height and crop sides
+              final containerWidth = constraints.maxWidth;
+              final containerHeight = constraints.maxHeight;
 
-          // Debug overlay (always visible for now)
-          Positioned(
-            top: 8,
-            left: 8,
-            right: 8,
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.7),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: ValueListenableBuilder<LIVAState>(
-                valueListenable: LIVAAnimation.state,
-                builder: (context, state, _) {
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
+              // Avatar should fill height, width may overflow and be cropped
+              final avatarSize = containerHeight; // Full height
+
+              return ClipRect(
+                child: OverflowBox(
+                  alignment: Alignment.center,
+                  maxWidth: avatarSize,
+                  maxHeight: avatarSize,
+                  child: SizedBox(
+                    width: avatarSize,
+                    height: avatarSize,
+                    child: LIVAAnimationView(
+                      key: const Key('avatar_canvas'),
+                      showDebugOverlay: _showDebug,
+                      loadingWidget: const Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          _buildMiniStatusIndicator(state),
-                          const SizedBox(width: 6),
+                          CircularProgressIndicator(color: Colors.white),
+                          SizedBox(height: 16),
                           Text(
-                            'SDK: ${_stateToString(state)}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                            ),
+                            'Connecting...',
+                            style: TextStyle(color: Colors.white),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Server: ${config?.serverUrl ?? "not set"}',
-                        style: const TextStyle(color: Colors.white60, fontSize: 9),
-                        overflow: TextOverflow.ellipsis,
+                      errorBuilder: (error) => Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.error_outline,
+                            color: Colors.red,
+                            size: 48,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            error,
+                            style: const TextStyle(color: Colors.white),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton(
+                            onPressed: _reconnect,
+                            child: const Text('Reconnect'),
+                          ),
+                        ],
                       ),
-                      Text(
-                        'User: ${config?.userId ?? "not set"} | Agent: ${config?.agentId ?? "not set"}',
-                        style: const TextStyle(color: Colors.white60, fontSize: 9),
-                      ),
-                      Text(
-                        'Initialized: $_isInitialized',
-                        style: const TextStyle(color: Colors.white60, fontSize: 9),
-                      ),
-                    ],
-                  );
-                },
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+
+          // Flutter debug overlay - HIDDEN (using native canvas debug instead)
+          if (false && _showDebug)
+            Positioned(
+              top: 8,
+              left: 8,
+              right: 8,
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.85),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.green.withOpacity(0.5), width: 1),
+                ),
+                child: ValueListenableBuilder<LIVAState>(
+                  valueListenable: LIVAAnimation.state,
+                  builder: (context, state, _) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Connection status row
+                        Row(
+                          children: [
+                            _buildMiniStatusIndicator(state),
+                            const SizedBox(width: 8),
+                            Text(
+                              'SDK: ${_stateToString(state)}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const Spacer(),
+                            // FPS display - prominent
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: _animDebugInfo.fps > 25
+                                    ? Colors.green.withOpacity(0.3)
+                                    : _animDebugInfo.fps > 10
+                                        ? Colors.orange.withOpacity(0.3)
+                                        : Colors.red.withOpacity(0.3),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                '${_animDebugInfo.fps.toStringAsFixed(1)} FPS',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        const Divider(color: Colors.white24, height: 1),
+                        const SizedBox(height: 8),
+
+                        // Animation info row
+                        Row(
+                          children: [
+                            // Mode indicator
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: _animDebugInfo.mode == 'overlay'
+                                    ? Colors.blue.withOpacity(0.3)
+                                    : Colors.grey.withOpacity(0.3),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                _animDebugInfo.mode.toUpperCase(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            // Overlay indicator
+                            if (_animDebugInfo.hasOverlay)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: Colors.purple.withOpacity(0.3),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: const Text(
+                                  'OVERLAY',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+
+                        // Animation name
+                        Text(
+                          'Animation: ${_animDebugInfo.animationName}',
+                          style: const TextStyle(
+                            color: Colors.greenAccent,
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 4),
+
+                        // Frame counter
+                        Text(
+                          'Frame: ${_animDebugInfo.frameNumber} / ${_animDebugInfo.totalFrames}',
+                          style: const TextStyle(
+                            color: Colors.cyanAccent,
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Divider(color: Colors.white24, height: 1),
+                        const SizedBox(height: 8),
+
+                        // Server/config info
+                        Text(
+                          'Server: ${config?.serverUrl ?? "not set"}',
+                          style: const TextStyle(color: Colors.white60, fontSize: 10),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'User: ${config?.userId ?? "not set"} | Agent: ${config?.agentId ?? "not set"}',
+                          style: const TextStyle(color: Colors.white60, fontSize: 10),
+                        ),
+                      ],
+                    );
+                  },
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

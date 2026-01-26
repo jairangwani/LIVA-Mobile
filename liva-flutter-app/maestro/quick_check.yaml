@@ -1,0 +1,5 @@
+appId: com.liva.livaApp
+---
+# Quick check after rebuild
+- waitForAnimationToEnd
+- takeScreenshot: screenshots/rebuild_check

@@ -54,7 +54,7 @@ public class LIVAAnimationPlugin: NSObject, FlutterPlugin {
         case "isConnected":
             result(LIVAClient.shared.isConnected)
         case "getDebugInfo":
-            result(getDebugInfo())
+            result(getAnimationDebugInfo())
         case "setDebugMode":
             handleSetDebugMode(call.arguments, result: result)
         case "getDebugLogs":
@@ -129,6 +129,11 @@ public class LIVAAnimationPlugin: NSObject, FlutterPlugin {
             "isConnected": LIVAClient.shared.isConnected,
             "debugDescription": LIVAClient.shared.debugDescription
         ]
+    }
+
+    /// Get real-time animation debug info for Flutter display
+    private func getAnimationDebugInfo() -> [String: Any] {
+        return LIVAClient.shared.getAnimationDebugInfo()
     }
 
     // MARK: - Callbacks

@@ -10,13 +10,13 @@ import '../features/settings/screens/settings_screen.dart';
 
 /// Router provider for navigation.
 final routerProvider = Provider<GoRouter>((ref) {
-  // TEST MODE: Skip login entirely, go straight to agents
+  // TEST MODE: Skip login and agents, go straight to chat with Agent 1
   return GoRouter(
-    initialLocation: '/agents',
+    initialLocation: '/chat',
     redirect: (context, state) {
-      // Redirect home to agents for testing
+      // Redirect home to chat for testing
       if (state.matchedLocation == '/') {
-        return '/agents';
+        return '/chat';
       }
       return null;
     },

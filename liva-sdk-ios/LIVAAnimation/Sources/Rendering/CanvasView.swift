@@ -64,12 +64,26 @@ public class LIVACanvasView: UIView {
     // MARK: - Debug
 
     /// Show debug overlay
-    public var showDebugInfo: Bool = false
+    public var showDebugInfo: Bool = true  // Default ON for testing
 
     /// Frame counter for FPS calculation
     private var frameCount = 0
     private var lastFPSTime: CFTimeInterval = 0
     private var currentFPS: Double = 0
+
+    /// Debug text layer for real-time info
+    private var debugTextLayer: CATextLayer?
+
+    /// Current debug info from animation engine
+    private var debugFPS: Double = 0
+    private var debugFrameNumber: Int = 0
+    private var debugTotalFrames: Int = 0
+    private var debugAnimationName: String = ""
+    private var debugMode: String = "idle"
+    private var debugHasOverlay: Bool = false
+    private var debugOverlayKey: String = ""
+    private var debugOverlaySeq: Int = 0
+    private var debugChunkIndex: Int = 0
 
     // MARK: - Initialization
 
@@ -101,6 +115,61 @@ public class LIVACanvasView: UIView {
         layer.addSublayer(baseImageLayer!)
 
         // Overlay image layers will be created dynamically as needed
+
+        // Debug text layer (always on top)
+        setupDebugLayer()
+    }
+
+    private func setupDebugLayer() {
+        debugTextLayer = CATextLayer()
+        debugTextLayer?.contentsScale = UIScreen.main.scale
+        debugTextLayer?.fontSize = 12
+        debugTextLayer?.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .bold)
+        debugTextLayer?.foregroundColor = UIColor.white.cgColor
+        debugTextLayer?.backgroundColor = UIColor.black.withAlphaComponent(0.85).cgColor
+        debugTextLayer?.cornerRadius = 6
+        debugTextLayer?.alignmentMode = .left
+        debugTextLayer?.isWrapped = true
+        debugTextLayer?.frame = CGRect(x: 10, y: 10, width: 280, height: 60)
+        layer.addSublayer(debugTextLayer!)
+    }
+
+    /// Update debug info from animation engine (called on every frame)
+    public func updateDebugInfo(fps: Double, frameNumber: Int, totalFrames: Int, animationName: String, mode: String, hasOverlay: Bool, overlayKey: String = "", overlaySeq: Int = 0, chunkIndex: Int = 0) {
+        debugFPS = fps
+        debugFrameNumber = frameNumber
+        debugTotalFrames = totalFrames
+        debugAnimationName = animationName
+        debugMode = mode
+        debugHasOverlay = hasOverlay
+        debugOverlayKey = overlayKey
+        debugOverlaySeq = overlaySeq
+        debugChunkIndex = chunkIndex
+
+        updateDebugText()
+    }
+
+    private func updateDebugText() {
+        guard showDebugInfo, let textLayer = debugTextLayer else {
+            debugTextLayer?.isHidden = true
+            return
+        }
+
+        debugTextLayer?.isHidden = false
+
+        let modeEmoji = debugMode == "overlay" ? "🎬" : "💤"
+        let overlayInfo = debugHasOverlay ? "c\(debugChunkIndex) f\(debugOverlaySeq)" : "none"
+
+        let text = """
+        \(modeEmoji) \(debugMode.uppercased()) | \(String(format: "%.0f", debugFPS)) FPS
+        Base: \(debugFrameNumber)/\(debugTotalFrames) | Ovr: \(overlayInfo)
+        \(debugAnimationName)
+        """
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        textLayer.string = text
+        CATransaction.commit()
     }
 
     public override func layoutSubviews() {
@@ -338,6 +407,7 @@ public class LIVACanvasView: UIView {
     ///   - base: Base animation frame
     ///   - overlays: Array of (overlay image, rect) pairs
     func renderFrame(base: UIImage, overlays: [(image: UIImage, frame: CGRect)]) {
+        let start = CACurrentMediaTime()
         baseFrame = base
         overlayFrames = overlays
 
@@ -346,6 +416,12 @@ public class LIVACanvasView: UIView {
             renderWithLayers()
         } else {
             setNeedsDisplay()
+        }
+
+        let elapsed = CACurrentMediaTime() - start
+        // Log slow renders (> 5ms)
+        if elapsed > 0.005 {
+            print("[CanvasView] ⏱️ Slow render: \(String(format: "%.2f", elapsed * 1000))ms, overlays=\(overlays.count)")
         }
     }
 

@@ -74,13 +74,13 @@ class AppConfigNotifier extends StateNotifier<UserConfig?> {
     // TESTING: Always use localhost, ignore cached serverUrl
     // final serverUrl = prefs.getString('serverUrl');
 
-    if (userId != null) {
-      state = UserConfig(
-        serverUrl: AppConfigConstants.backendUrl, // FORCE localhost for testing
-        userId: userId,
-        agentId: agentId ?? AppConfigConstants.defaultAgentId,
-      );
-    }
+    // TEST MODE: Auto-initialize with Agent 1 if no config
+    // This allows the app to start directly with the chat screen
+    state = UserConfig(
+      serverUrl: AppConfigConstants.backendUrl,
+      userId: userId ?? 'test_user_mobile',
+      agentId: agentId ?? AppConfigConstants.defaultAgentId,
+    );
   }
 
   Future<void> setConfig(UserConfig config) async {

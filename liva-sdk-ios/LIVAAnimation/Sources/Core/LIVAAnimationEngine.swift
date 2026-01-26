@@ -72,11 +72,23 @@ class LIVADebugLog {
     }
 }
 
+/// Delegate protocol for animation engine events
+protocol LIVAAnimationEngineDelegate: AnyObject {
+    /// Called when audio should start playing for a chunk (synced with animation)
+    func animationEngine(_ engine: LIVAAnimationEngine, playAudioData data: Data, forChunk chunkIndex: Int)
+
+    /// Called when all chunks have finished playing
+    func animationEngineDidFinishAllChunks(_ engine: LIVAAnimationEngine)
+}
+
 /// Core animation rendering engine
 /// Handles base animations + overlay frames (lip sync) with synchronized playback
 class LIVAAnimationEngine {
 
     // MARK: - Properties
+
+    /// Delegate for audio playback events
+    weak var delegate: LIVAAnimationEngineDelegate?
 
     /// Current animation mode
     private var mode: AnimationMode = .idle
@@ -117,16 +129,44 @@ class LIVAAnimationEngine {
     /// Canvas view for rendering
     private weak var canvasView: LIVACanvasView?
 
+    /// FPS tracking for debug info (animation FPS, not render FPS)
+    private var animationFrameCount: Int = 0
+    private var fpsLastUpdateTime: CFTimeInterval = 0
+    private var currentFPS: Double = 0.0
+
+    /// Time-based frame advancement (accumulator pattern)
+    /// This allows rendering at 60fps while animating at 30fps
+    private var idleFrameAccumulator: CFTimeInterval = 0.0
+    private var overlayFrameAccumulator: CFTimeInterval = 0.0
+    private let idleFrameDuration: CFTimeInterval = 1.0 / 30.0  // 30 FPS for idle
+    private let overlayFrameDuration: CFTimeInterval = 1.0 / 30.0  // 30 FPS for overlay
+
+    /// Current overlay info for debug display
+    private var currentOverlayKey: String = ""
+    private var currentOverlaySeq: Int = 0
+    private var currentChunkIndex: Int = 0
+
+    // MARK: - Audio-Animation Sync (Performance Fix)
+
+    /// Pending audio data per chunk (audio doesn't play immediately - animation triggers it)
+    private var pendingAudioChunks: [Int: Data] = [:]
+
+    /// Track which chunks have started audio playback
+    private var audioStartedForChunk: Set<Int> = []
+
     // MARK: - Constants
 
-    /// Idle animation frame rate (FPS)
-    private let idleFrameRate: Double = 10.0
+    /// Idle animation frame rate (FPS) - increased from 10 to 30 for smoother playback
+    private let idleFrameRate: Double = 30.0
 
     /// Active animation frame rate (FPS) - overlay/transition modes
     private let activeFrameRate: Double = 30.0
 
     /// Default idle animation name (full name format: state_num_pos_state_num_pos)
     private let defaultIdleAnimation = "idle_1_s_idle_1_e"
+
+    /// Alternate idle animation (plays in reverse direction for seamless looping)
+    private let alternateIdleAnimation = "idle_1_e_idle_1_s"
 
     /// Minimum frames needed before starting playback (adaptive buffering)
     private let minFramesBeforeStart = 10
@@ -155,10 +195,17 @@ class LIVAAnimationEngine {
         }
 
         displayLink = CADisplayLink(target: self, selector: #selector(draw))
+        // Run at 60 FPS for smooth animation (no throttling)
+        if #available(iOS 15.0, *) {
+            displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+        } else {
+            displayLink?.preferredFramesPerSecond = 60
+        }
         displayLink?.add(to: .main, forMode: .common)
         lastFrameTime = CACurrentMediaTime()
+        fpsLastUpdateTime = CACurrentMediaTime()
 
-        animLog("[LIVAAnimationEngine] ▶️ Started rendering")
+        animLog("[LIVAAnimationEngine] ▶️ Started rendering at 60 FPS")
     }
 
     /// Stop the rendering loop
@@ -216,13 +263,34 @@ class LIVAAnimationEngine {
         }
     }
 
-    /// Cache overlay image for later playback
+    /// Cache overlay image for later playback (synchronous - use async version for better performance)
     /// - Parameters:
     ///   - image: Overlay image
-    ///   - key: Cache key (format: "chunkIndex_sectionIndex_sequenceIndex")
+    ///   - key: Cache key (format: "chunkIndex-sectionIndex-sequenceIndex")
     ///   - chunkIndex: Chunk index for batch eviction
     func cacheOverlayImage(_ image: UIImage, forKey key: String, chunkIndex: Int) {
         imageCache.setImage(image, forKey: key, chunkIndex: chunkIndex)
+    }
+
+    /// Process and cache overlay image asynchronously (NON-BLOCKING - prevents FPS drops)
+    /// Base64 decoding and UIImage creation happen on background thread
+    /// - Parameters:
+    ///   - base64Data: Base64 encoded image string
+    ///   - key: Cache key (format: "chunkIndex-sectionIndex-sequenceIndex")
+    ///   - chunkIndex: Chunk index for batch tracking
+    ///   - completion: Optional callback when done (called on main queue)
+    func processAndCacheOverlayImageAsync(
+        base64Data: String,
+        key: String,
+        chunkIndex: Int,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        imageCache.processAndCacheAsync(
+            base64Data: base64Data,
+            key: key,
+            chunkIndex: chunkIndex,
+            completion: completion
+        )
     }
 
     /// Get overlay image from cache
@@ -230,6 +298,40 @@ class LIVAAnimationEngine {
     /// - Returns: Cached image if available
     func getOverlayImage(forKey key: String) -> UIImage? {
         return imageCache.getImage(forKey: key)
+    }
+
+    // MARK: - Audio-Animation Sync
+
+    /// Queue audio data for a chunk - does NOT play immediately
+    /// Audio will start when first overlay frame of this chunk renders
+    /// This ensures perfect lip sync (like web frontend)
+    /// - Parameters:
+    ///   - chunkIndex: Chunk index
+    ///   - audioData: Raw audio data
+    func queueAudioForChunk(chunkIndex: Int, audioData: Data) {
+        pendingAudioChunks[chunkIndex] = audioData
+        animLog("[LIVAAnimationEngine] 📦 Queued audio for chunk \(chunkIndex) (NOT playing yet - will sync with animation)")
+    }
+
+    /// Start audio for a chunk (called when first frame renders)
+    private func startAudioForChunk(_ chunkIndex: Int) {
+        guard let audioData = pendingAudioChunks[chunkIndex] else {
+            animLog("[LIVAAnimationEngine] ⚠️ No audio data for chunk \(chunkIndex)")
+            return
+        }
+
+        // Don't start audio twice for same chunk
+        guard !audioStartedForChunk.contains(chunkIndex) else { return }
+
+        audioStartedForChunk.insert(chunkIndex)
+
+        // Notify delegate to play audio NOW (in sync with animation)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.delegate?.animationEngine(self, playAudioData: audioData, forChunk: chunkIndex)
+        }
+
+        animLog("[LIVAAnimationEngine] 🔊 Started audio for chunk \(chunkIndex) - IN SYNC with first overlay frame")
     }
 
     /// Reset to idle state
@@ -242,6 +344,12 @@ class LIVAAnimationEngine {
         overlayQueue.removeAll()
         isSetPlaying = false
         imageCache.clearAll()
+        // Reset time accumulators
+        idleFrameAccumulator = 0.0
+        overlayFrameAccumulator = 0.0
+        // Clear audio state
+        pendingAudioChunks.removeAll()
+        audioStartedForChunk.removeAll()
 
         animLog("[LIVAAnimationEngine] 🔄 Reset to idle")
     }
@@ -260,12 +368,20 @@ class LIVAAnimationEngine {
         overlayQueue.removeAll()
         isSetPlaying = false
 
+        // Reset time accumulators
+        idleFrameAccumulator = 0.0
+        overlayFrameAccumulator = 0.0
+
         // CRITICAL: Clear overlay image cache to prevent stale overlays from previous response
-        // Without this, chunk indices reset to 0 but old images at key "0_0_0" etc. would be reused
+        // Without this, chunk indices reset to 0 but old images at key "0-0-0" etc. would be reused
         // This caused visual desync in web frontend (fixed 2026-01-26) - same fix needed here
         imageCache.clearAll()
 
-        animLog("[LIVAAnimationEngine] 🔄 forceIdleNow - cleared all caches and state")
+        // Clear pending audio data (new message = new audio)
+        pendingAudioChunks.removeAll()
+        audioStartedForChunk.removeAll()
+
+        animLog("[LIVAAnimationEngine] 🔄 forceIdleNow - cleared all caches, state, and audio")
     }
 
     // MARK: - Rendering Loop
@@ -275,22 +391,40 @@ class LIVAAnimationEngine {
     /// Enable detailed frame sync logging (set to true to debug frame matching)
     var frameSyncDebugEnabled: Bool = true
 
+    /// Performance tracking
+    private var perfTrackingEnabled: Bool = true
+    private var lastPerfLogTime: CFTimeInterval = 0
+    private var drawTimes: [CFTimeInterval] = []
+    private var cacheLookupTimes: [CFTimeInterval] = []
+    private var renderTimes: [CFTimeInterval] = []
+
     @objc private func draw(link: CADisplayLink) {
+        let drawStartTime = CACurrentMediaTime()
         let now = link.timestamp
-        let elapsed = now - lastFrameTime
+        let deltaTime = now - lastFrameTime
 
-        // Throttle to 30 FPS (overlay/transition) or 10 FPS (idle)
-        let isIdleMode = mode == .idle
-        let frameDuration = isIdleMode ? (1.0 / idleFrameRate) : (1.0 / activeFrameRate)
-
-        guard elapsed >= frameDuration else { return }
-
+        // Track delta time for frame advancement
         lastFrameTime = now
         drawCallCount += 1
 
+        // Accumulate time for frame advancement (time-based animation)
+        if mode == .overlay {
+            overlayFrameAccumulator += deltaTime
+        } else {
+            idleFrameAccumulator += deltaTime
+        }
+
+        // FPS tracking - measure animation frames, not render frames
+        let fpsDelta = now - fpsLastUpdateTime
+        if fpsDelta >= 1.0 {
+            currentFPS = Double(animationFrameCount) / fpsDelta
+            animationFrameCount = 0
+            fpsLastUpdateTime = now
+        }
+
         // Log every 100 frames to avoid spam (summary)
         if drawCallCount % 100 == 1 {
-            animLog("[LIVAAnimationEngine] 🎨 Draw #\(drawCallCount): mode=\(mode), overlaySections=\(overlaySections.count), queue=\(overlayQueue.count)")
+            animLog("[LIVAAnimationEngine] 🎨 Draw #\(drawCallCount): mode=\(mode), overlaySections=\(overlaySections.count), queue=\(overlayQueue.count), animFPS=\(String(format: "%.1f", currentFPS))")
         }
 
         // 1. Determine base frame to draw
@@ -312,6 +446,10 @@ class LIVAAnimationEngine {
                 mode = .overlay
 
                 animLog("[LIVAAnimationEngine] 🎬 Starting overlay chunk \(overlayDriven.chunkIndex)")
+
+                // AUDIO-ANIMATION SYNC: Start audio when first frame of chunk renders
+                // This ensures perfect lip sync (audio and animation start together)
+                startAudioForChunk(overlayDriven.chunkIndex)
             }
 
             // Switch base animation if needed
@@ -350,6 +488,7 @@ class LIVAAnimationEngine {
         }
 
         // 2. Collect overlay images to draw
+        let cacheLookupStart = CACurrentMediaTime()
         var overlaysToRender: [(image: UIImage, frame: CGRect)] = []
         var overlayKey: String? = nil
         var hasOverlayImage: Bool = false
@@ -359,27 +498,37 @@ class LIVAAnimationEngine {
                 let state = overlayStates[index]
 
                 guard state.playing, !state.done else { continue }
+                guard state.currentDrawingFrame < section.frames.count else { continue }
 
                 let overlayFrame = section.frames[state.currentDrawingFrame]
+
+                // CRITICAL FIX: Use array index (state.currentDrawingFrame) for cache lookup
+                // This matches how web frontend does it and how we store images in LIVAClient
+                // Store: key = "chunk_section_arrayIndex" (0, 1, 2, 3...)
+                // Lookup: key = "chunk_section_currentDrawingFrame" (0, 1, 2, 3...)
                 let key = getOverlayKey(
                     chunkIndex: section.chunkIndex,
                     sectionIndex: section.sectionIndex,
-                    sequenceIndex: state.currentDrawingFrame
+                    sequenceIndex: state.currentDrawingFrame  // Use array index, NOT overlayFrame.sequenceIndex!
                 )
                 overlayKey = key
 
                 if let overlayImage = imageCache.getImage(forKey: key) {
                     overlaysToRender.append((overlayImage, overlayFrame.coordinates))
                     hasOverlayImage = true
-                } else {
-                    // Missing overlay frame - log warning
-                    hasOverlayImage = false
-                    if state.currentDrawingFrame % 10 == 0 {
-                        animLog("[LIVAAnimationEngine] ⚠️ Missing overlay frame: \(key)")
+
+                    // Log image size to verify correct image
+                    if state.currentDrawingFrame == 0 || state.currentDrawingFrame % 30 == 0 {
+                        animLog("[LIVAAnimationEngine] 🖼️ Got overlay: key=\(key), size=\(overlayImage.size), coords=\(overlayFrame.coordinates)")
                     }
+                } else {
+                    // Missing overlay frame - log warning every frame when missing
+                    hasOverlayImage = false
+                    animLog("[LIVAAnimationEngine] ⚠️ MISSING overlay: key=\(key), drawFrame=\(state.currentDrawingFrame), seqIndex=\(overlayFrame.sequenceIndex), cacheCount=\(imageCache.count)")
                 }
             }
         }
+        let cacheLookupTime = CACurrentMediaTime() - cacheLookupStart
 
         // ═══ FRAME SYNC DEBUG LOGGING ═══
         // Log every frame in overlay mode for debugging (like web frontend's LOG_FRAME_SYNC_DEBUG)
@@ -396,10 +545,69 @@ class LIVAAnimationEngine {
         }
 
         // 3. Render frame to canvas
+        let renderStart = CACurrentMediaTime()
         if let baseImage = baseImage {
             canvasView?.renderFrame(base: baseImage, overlays: overlaysToRender)
+
+            // Update debug info on canvas (real-time display)
+            // IMPORTANT: Show ACTUAL base animation frame info (not overlay counts)
+            let baseFrameCount = animationFrames[currentOverlayBaseName]?.count ?? expectedFrameCounts[currentOverlayBaseName] ?? 0
+            let baseFrameNum = globalFrameIndex
+
+            if mode == .overlay && !overlaySections.isEmpty {
+                currentChunkIndex = overlaySections.first?.chunkIndex ?? 0
+                let drawFrame = overlayStates.first?.currentDrawingFrame ?? 0
+                // Get the actual sequenceIndex from the frame metadata
+                if let section = overlaySections.first, drawFrame < section.frames.count {
+                    currentOverlaySeq = section.frames[drawFrame].sequenceIndex
+                } else {
+                    currentOverlaySeq = drawFrame
+                }
+                currentOverlayKey = getOverlayKey(chunkIndex: currentChunkIndex, sectionIndex: 0, sequenceIndex: currentOverlaySeq)
+            } else {
+                currentOverlayKey = ""
+                currentOverlaySeq = 0
+                currentChunkIndex = 0
+            }
+
+            canvasView?.updateDebugInfo(
+                fps: currentFPS,
+                frameNumber: baseFrameNum,  // Actual base frame index
+                totalFrames: baseFrameCount,  // Actual base animation frame count
+                animationName: currentOverlayBaseName,
+                mode: mode == .overlay ? "overlay" : "idle",
+                hasOverlay: !overlaysToRender.isEmpty,
+                overlayKey: currentOverlayKey,
+                overlaySeq: currentOverlaySeq,
+                chunkIndex: currentChunkIndex
+            )
         } else {
             animLog("[LIVAAnimationEngine] ⚠️ No base image for frame \(globalFrameIndex) in \(currentOverlayBaseName)")
+        }
+        let renderTime = CACurrentMediaTime() - renderStart
+        let totalDrawTime = CACurrentMediaTime() - drawStartTime
+
+        // Performance tracking - log every second during overlay mode
+        if perfTrackingEnabled && mode == .overlay {
+            drawTimes.append(totalDrawTime)
+            cacheLookupTimes.append(cacheLookupTime)
+            renderTimes.append(renderTime)
+
+            if now - lastPerfLogTime >= 1.0 {
+                let avgDraw = drawTimes.reduce(0, +) / Double(max(drawTimes.count, 1)) * 1000
+                let avgCache = cacheLookupTimes.reduce(0, +) / Double(max(cacheLookupTimes.count, 1)) * 1000
+                let avgRender = renderTimes.reduce(0, +) / Double(max(renderTimes.count, 1)) * 1000
+                let maxDraw = (drawTimes.max() ?? 0) * 1000
+                let maxCache = (cacheLookupTimes.max() ?? 0) * 1000
+                let maxRender = (renderTimes.max() ?? 0) * 1000
+
+                animLog("[PERF] avg: draw=\(String(format: "%.2f", avgDraw))ms cache=\(String(format: "%.2f", avgCache))ms render=\(String(format: "%.2f", avgRender))ms | max: draw=\(String(format: "%.2f", maxDraw))ms cache=\(String(format: "%.2f", maxCache))ms render=\(String(format: "%.2f", maxRender))ms | samples=\(drawTimes.count)")
+
+                drawTimes.removeAll()
+                cacheLookupTimes.removeAll()
+                renderTimes.removeAll()
+                lastPerfLogTime = now
+            }
         }
 
         // 4. Advance frame counters
@@ -462,10 +670,11 @@ class LIVAAnimationEngine {
     private func isFirstOverlayFrameReady(_ section: OverlaySection) -> Bool {
         guard !section.frames.isEmpty else { return false }
 
+        // Use array index 0 for first frame (matches how we store images)
         let key = getOverlayKey(
             chunkIndex: section.chunkIndex,
             sectionIndex: section.sectionIndex,
-            sequenceIndex: 0
+            sequenceIndex: 0  // First frame is at array index 0
         )
 
         let hasImage = imageCache.hasImage(forKey: key)
@@ -485,40 +694,129 @@ class LIVAAnimationEngine {
 
     // MARK: - Frame Advancement
 
-    /// Advance overlay frame counters
+    /// Advance overlay frame counters (time-based)
     private func advanceOverlays() {
-        for (index, section) in overlaySections.enumerated() {
-            var state = overlayStates[index]
+        // Only advance when enough time has accumulated
+        guard overlayFrameAccumulator >= overlayFrameDuration else { return }
 
-            guard state.playing && !state.done else { continue }
+        // Consume accumulated time (advance one frame per duration)
+        while overlayFrameAccumulator >= overlayFrameDuration {
+            overlayFrameAccumulator -= overlayFrameDuration
 
-            // Skip first advance to sync with base frame
-            if state.skipFirstAdvance {
-                state.skipFirstAdvance = false
+            var didAdvance = false
+
+            for (index, section) in overlaySections.enumerated() {
+                var state = overlayStates[index]
+
+                guard state.playing && !state.done else { continue }
+
+                // Skip first advance to sync with base frame
+                if state.skipFirstAdvance {
+                    state.skipFirstAdvance = false
+                    overlayStates[index] = state
+                    continue
+                }
+
+                // Advance overlay frame counter
+                state.currentDrawingFrame += 1
+                didAdvance = true
+
+                if state.currentDrawingFrame >= section.frames.count {
+                    state.playing = false
+                    state.done = true
+
+                    animLog("[LIVAAnimationEngine] ✅ Overlay chunk \(section.chunkIndex) finished")
+                }
+
                 overlayStates[index] = state
-                continue
             }
 
-            // Advance overlay frame counter
-            state.currentDrawingFrame += 1
-
-            if state.currentDrawingFrame >= section.frames.count {
-                state.playing = false
-                state.done = true
-
-                animLog("[LIVAAnimationEngine] ✅ Overlay chunk \(section.chunkIndex) finished")
+            // Count animation frame for FPS (not render frame)
+            if didAdvance {
+                animationFrameCount += 1
             }
-
-            overlayStates[index] = state
         }
     }
 
-    /// Advance idle frame counter
+    /// Advance idle frame counter (time-based)
+    /// Alternates between idle_1_s_idle_1_e and idle_1_e_idle_1_s for seamless looping
     private func advanceIdleFrame() {
         let baseFrames = animationFrames[currentOverlayBaseName] ?? []
         guard !baseFrames.isEmpty else { return }
 
-        globalFrameIndex = (globalFrameIndex + 1) % baseFrames.count
+        // Only advance frame when enough time has accumulated
+        while idleFrameAccumulator >= idleFrameDuration {
+            idleFrameAccumulator -= idleFrameDuration
+
+            let nextFrame = globalFrameIndex + 1
+
+            if nextFrame >= baseFrames.count {
+                // Animation finished - switch to alternate idle animation
+                let nextAnim: String
+                if currentOverlayBaseName == defaultIdleAnimation {
+                    nextAnim = alternateIdleAnimation
+                } else if currentOverlayBaseName == alternateIdleAnimation {
+                    nextAnim = defaultIdleAnimation
+                } else {
+                    nextAnim = defaultIdleAnimation
+                }
+
+                // Only switch if alternate animation has frames loaded
+                if let nextFrames = animationFrames[nextAnim], !nextFrames.isEmpty {
+                    currentOverlayBaseName = nextAnim
+                    globalFrameIndex = 0
+                } else {
+                    // Fallback: wrap around within same animation
+                    globalFrameIndex = 0
+                }
+            } else {
+                globalFrameIndex = nextFrame
+            }
+
+            // Count animation frame for FPS (not render frame)
+            animationFrameCount += 1
+        }
+    }
+
+    // MARK: - Transitions
+
+    /// Transition smoothly back to idle animation
+    private func transitionToIdle() {
+        mode = .idle
+
+        // Switch back to default idle animation
+        currentOverlayBaseName = defaultIdleAnimation
+        globalFrameIndex = 0
+
+        // Reset accumulators for clean start
+        idleFrameAccumulator = 0.0
+        overlayFrameAccumulator = 0.0
+
+        // Clear ALL overlay state to prevent any flickering
+        overlaySections.removeAll()
+        overlayStates.removeAll()
+        overlayQueue.removeAll()
+        isSetPlaying = false
+
+        // Clear overlay tracking
+        currentOverlayKey = ""
+        currentOverlaySeq = 0
+        currentChunkIndex = 0
+
+        // Clear overlay image cache to prevent stale frames
+        imageCache.clearAll()
+
+        // Clear audio state (chunks complete)
+        pendingAudioChunks.removeAll()
+        audioStartedForChunk.removeAll()
+
+        // Notify delegate that all chunks finished
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.delegate?.animationEngineDidFinishAllChunks(self)
+        }
+
+        animLog("[LIVAAnimationEngine] 💤 Transitioned to idle: \(currentOverlayBaseName), cleared all overlay caches and audio")
     }
 
     // MARK: - Cleanup & Queue Management
@@ -554,9 +852,8 @@ class LIVAAnimationEngine {
                     animLog("[LIVAAnimationEngine] ▶️ Starting next chunk from queue")
                     startNextOverlaySetIfAny()
                 } else {
-                    // All chunks done, return to idle
-                    mode = .idle
-                    animLog("[LIVAAnimationEngine] 💤 Returned to idle mode")
+                    // All chunks done, return to idle smoothly
+                    transitionToIdle()
                 }
             }
         }
@@ -612,10 +909,11 @@ class LIVAAnimationEngine {
         var readyCount = 0
 
         for i in 0..<framesToCheck {
+            // Use array index for cache lookup (matches how we store images)
             let key = getOverlayKey(
                 chunkIndex: section.chunkIndex,
                 sectionIndex: section.sectionIndex,
-                sequenceIndex: i
+                sequenceIndex: i  // Use array index, NOT frame.sequenceIndex!
             )
 
             if imageCache.hasImage(forKey: key) {
@@ -626,5 +924,39 @@ class LIVAAnimationEngine {
         }
 
         return readyCount >= minFramesBeforeStart
+    }
+
+    // MARK: - Debug Info
+
+    /// Get real-time debug info for display in Flutter UI
+    func getDebugInfo() -> [String: Any] {
+        // Determine current animation name
+        let animationName: String
+        let frameNumber: Int
+        var totalFrames: Int = 0
+        let hasOverlay = !overlaySections.isEmpty
+
+        if mode == .overlay && !overlaySections.isEmpty {
+            // In overlay mode, show overlay animation info from first frame
+            animationName = overlaySections.first?.frames.first?.animationName ?? currentOverlayBaseName
+            frameNumber = overlayStates.first?.currentDrawingFrame ?? 0
+            totalFrames = overlaySections.first?.frames.count ?? 0
+        } else {
+            // In idle mode, show idle animation info
+            animationName = currentOverlayBaseName
+            frameNumber = globalFrameIndex
+            totalFrames = animationFrames[currentOverlayBaseName]?.count ?? expectedFrameCounts[currentOverlayBaseName] ?? 0
+        }
+
+        return [
+            "fps": currentFPS,
+            "animationName": animationName,
+            "frameNumber": frameNumber,
+            "totalFrames": totalFrames,
+            "mode": mode == .overlay ? "overlay" : "idle",
+            "hasOverlay": hasOverlay,
+            "queuedChunks": overlayQueue.count,
+            "drawCount": drawCallCount
+        ]
     }
 }
