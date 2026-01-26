@@ -59,6 +59,11 @@ public class LIVAAnimationPlugin: NSObject, FlutterPlugin {
             handleSetDebugMode(call.arguments, result: result)
         case "getDebugLogs":
             result(LIVAClient.shared.getDebugLogs())
+        case "forceIdleNow":
+            // Force immediate transition to idle and clear all caches
+            // Call this BEFORE sending a new message to prevent stale overlay reuse
+            LIVAClient.shared.forceIdleNow()
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }

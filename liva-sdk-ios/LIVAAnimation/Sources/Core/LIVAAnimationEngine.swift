@@ -246,6 +246,28 @@ class LIVAAnimationEngine {
         animLog("[LIVAAnimationEngine] 🔄 Reset to idle")
     }
 
+    /// Force immediate transition to idle and clear all caches
+    /// Call this when a new message is about to be sent to prevent stale overlay reuse
+    /// This matches web frontend's forceIdleNow() behavior
+    func forceIdleNow() {
+        // Stop any playing overlays
+        mode = .idle
+        globalFrameIndex = 0
+
+        // Clear all overlay state
+        overlaySections.removeAll()
+        overlayStates.removeAll()
+        overlayQueue.removeAll()
+        isSetPlaying = false
+
+        // CRITICAL: Clear overlay image cache to prevent stale overlays from previous response
+        // Without this, chunk indices reset to 0 but old images at key "0_0_0" etc. would be reused
+        // This caused visual desync in web frontend (fixed 2026-01-26) - same fix needed here
+        imageCache.clearAll()
+
+        animLog("[LIVAAnimationEngine] 🔄 forceIdleNow - cleared all caches and state")
+    }
+
     // MARK: - Rendering Loop
 
     private var drawCallCount = 0

@@ -60,6 +60,11 @@ class ChatNotifier extends StateNotifier<ChatState> {
   Future<void> sendMessage(String content) async {
     if (content.trim().isEmpty) return;
 
+    // CRITICAL: Force idle and clear caches BEFORE sending new message
+    // This prevents stale overlays from previous response being reused
+    // Matches web frontend's forceIdleNow() + stopAllAudio() behavior
+    await LIVAAnimation.forceIdleNow();
+
     // Add user message
     final userMessage = ChatMessage(
       id: DateTime.now().millisecondsSinceEpoch.toString(),

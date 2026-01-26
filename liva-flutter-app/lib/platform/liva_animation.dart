@@ -220,6 +220,17 @@ class LIVAAnimation {
     }
   }
 
+  /// Force immediate transition to idle and clear all caches.
+  /// Call this BEFORE sending a new message to prevent stale overlay reuse.
+  /// This matches web frontend's forceIdleNow() + stopAllAudio() behavior.
+  static Future<void> forceIdleNow() async {
+    try {
+      await _channel.invokeMethod('forceIdleNow');
+    } on PlatformException catch (e) {
+      onError?.call(e.message ?? 'forceIdleNow failed');
+    }
+  }
+
   // MARK: - Debug Controls
 
   /// Enable or disable debug overlay on the canvas.

@@ -153,6 +153,33 @@ public final class LIVAClient {
         state = .idle
     }
 
+    /// Force immediate transition to idle and clear all caches
+    /// Call this BEFORE sending a new message to prevent stale overlay reuse
+    /// This matches web frontend's forceIdleNow() + stopAllAudio() behavior
+    public func forceIdleNow() {
+        clientLog("[LIVAClient] 🔄 forceIdleNow - stopping audio and clearing caches")
+
+        // Stop any ongoing audio playback (like web's stopAllAudio)
+        audioPlayer?.stop()
+
+        // Clear legacy animation engine
+        animationEngine?.clearQueue()
+
+        // Clear new animation engine caches and state
+        newAnimationEngine?.forceIdleNow()
+
+        // Clear pending state in client
+        currentChunkFrames.removeAll()
+        pendingOverlayPositions.removeAll()
+        pendingOverlayFrames.removeAll()
+        chunkAnimationNames.removeAll()
+
+        // Update state if we were animating
+        if state == .animating {
+            state = .connected
+        }
+    }
+
     // MARK: - Socket Callbacks
 
     private func setupSocketCallbacks() {
