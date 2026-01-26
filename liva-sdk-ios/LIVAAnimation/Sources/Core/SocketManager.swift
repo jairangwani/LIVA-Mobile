@@ -83,6 +83,10 @@ final class LIVASocketManager {
     var onBaseFrameReceived: ((String, Int, Data) -> Void)?
     var onAnimationFramesComplete: ((String) -> Void)?
 
+    // NEW - Animation engine callbacks (chunk streaming)
+    var onAnimationChunkMetadata: (([String: Any]) -> Void)?
+    var onFrameImageReceived: (([String: Any]) -> Void)?
+
     // MARK: - Initialization
 
     init(configuration: LIVAConfiguration) {
@@ -227,6 +231,15 @@ final class LIVASocketManager {
 
         socket.on("animation_frames_complete") { [weak self] data, _ in
             self?.handleAnimationFramesCompleteEvent(data)
+        }
+
+        // NEW - Animation engine events (chunk streaming)
+        socket.on("animation_chunk_metadata") { [weak self] data, _ in
+            self?.handleAnimationChunkMetadataEvent(data)
+        }
+
+        socket.on("receive_frame_image") { [weak self] data, _ in
+            self?.handleFrameImageEvent(data)
         }
     }
 
@@ -376,6 +389,30 @@ final class LIVASocketManager {
         }
 
         onAnimationFramesComplete?(animationName)
+    }
+
+    // NEW - Animation chunk metadata event handler
+    private func handleAnimationChunkMetadataEvent(_ data: [Any]) {
+        guard let dict = data.first as? [String: Any] else {
+            print("[LIVASocketManager] ⚠️ Invalid animation_chunk_metadata format")
+            return
+        }
+
+        print("[LIVASocketManager] 📦 Received animation_chunk_metadata: chunk \(dict["chunk_index"] ?? "?")")
+
+        // Forward raw dictionary to callback - LIVAAnimationEngine will parse it
+        onAnimationChunkMetadata?(dict)
+    }
+
+    // NEW - Frame image event handler
+    private func handleFrameImageEvent(_ data: [Any]) {
+        guard let dict = data.first as? [String: Any] else {
+            print("[LIVASocketManager] ⚠️ Invalid receive_frame_image format")
+            return
+        }
+
+        // Forward raw dictionary to callback - LIVAAnimationEngine will parse it
+        onFrameImageReceived?(dict)
     }
 
     // MARK: - Reconnection

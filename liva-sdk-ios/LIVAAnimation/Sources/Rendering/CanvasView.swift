@@ -24,8 +24,8 @@ public class LIVACanvasView: UIView {
     /// Current overlay frame image
     private var overlayFrame: UIImage?
 
-    /// Overlay position (where to draw mouth/lips)
-    private var overlayPosition: CGPoint = .zero
+    /// Overlay frames with positions (multiple overlays supported)
+    private var overlayFrames: [(image: UIImage, frame: CGRect)] = []
 
     /// Display link for render loop
     private var displayLink: CADisplayLink?
@@ -49,7 +49,7 @@ public class LIVACanvasView: UIView {
 
     /// Use Core Animation for compositing
     private var baseImageLayer: CALayer?
-    private var overlayImageLayer: CALayer?
+    private var overlayImageLayers: [CALayer] = []
 
     // MARK: - Feathered Overlay
 
@@ -100,11 +100,7 @@ public class LIVACanvasView: UIView {
         baseImageLayer?.contentsScale = UIScreen.main.scale
         layer.addSublayer(baseImageLayer!)
 
-        // Overlay image layer (lip sync)
-        overlayImageLayer = CALayer()
-        overlayImageLayer?.contentsGravity = .resizeAspect
-        overlayImageLayer?.contentsScale = UIScreen.main.scale
-        layer.addSublayer(overlayImageLayer!)
+        // Overlay image layers will be created dynamically as needed
     }
 
     public override func layoutSubviews() {
@@ -115,7 +111,6 @@ public class LIVACanvasView: UIView {
     private func updateContentLayout() {
         guard let baseImage = baseFrame else {
             baseImageLayer?.frame = bounds
-            overlayImageLayer?.frame = bounds
             return
         }
 
@@ -171,20 +166,18 @@ public class LIVACanvasView: UIView {
 
             base.draw(in: CGRect(x: x, y: y, width: scaledSize.width, height: scaledSize.height))
 
-            // Draw overlay at scaled position
-            if let overlay = overlayFrame {
-                let scaledX = x + overlayPosition.x * scale
-                let scaledY = y + overlayPosition.y * scale
-                let overlayScaledSize = CGSize(
-                    width: overlay.size.width * scale,
-                    height: overlay.size.height * scale
-                )
+            // Draw overlays at scaled positions
+            for (overlayImage, overlayRect) in overlayFrames {
+                let scaledX = x + overlayRect.origin.x * scale
+                let scaledY = y + overlayRect.origin.y * scale
+                let scaledWidth = overlayRect.width * scale
+                let scaledHeight = overlayRect.height * scale
 
-                overlay.draw(in: CGRect(
+                overlayImage.draw(in: CGRect(
                     x: scaledX,
                     y: scaledY,
-                    width: overlayScaledSize.width,
-                    height: overlayScaledSize.height
+                    width: scaledWidth,
+                    height: scaledHeight
                 ))
             }
         }
@@ -208,26 +201,30 @@ public class LIVACanvasView: UIView {
             baseImageLayer?.frame = CGRect(origin: contentOffset, size: contentSize)
         }
 
-        // Update overlay layer with feathered edges
-        if let overlay = overlayFrame {
-            overlayImageLayer?.isHidden = false
+        // Remove old overlay layers
+        overlayImageLayers.forEach { $0.removeFromSuperlayer() }
+        overlayImageLayers.removeAll()
 
+        // Create new overlay layers for each overlay
+        for (overlayImage, overlayRect) in overlayFrames {
             let scaledPosition = CGPoint(
-                x: contentOffset.x + overlayPosition.x * contentScale,
-                y: contentOffset.y + overlayPosition.y * contentScale
+                x: contentOffset.x + overlayRect.origin.x * contentScale,
+                y: contentOffset.y + overlayRect.origin.y * contentScale
             )
 
             let overlayScaledSize = CGSize(
-                width: overlay.size.width * contentScale,
-                height: overlay.size.height * contentScale
+                width: overlayRect.width * contentScale,
+                height: overlayRect.height * contentScale
             )
 
-            // Apply feathered mask to overlay
-            let featheredOverlay = createFeatheredOverlay(overlay)
-            overlayImageLayer?.contents = featheredOverlay?.cgImage
-            overlayImageLayer?.frame = CGRect(origin: scaledPosition, size: overlayScaledSize)
-        } else {
-            overlayImageLayer?.isHidden = true
+            let overlayLayer = CALayer()
+            overlayLayer.contentsGravity = .resizeAspect
+            overlayLayer.contentsScale = UIScreen.main.scale
+            overlayLayer.contents = overlayImage.cgImage
+            overlayLayer.frame = CGRect(origin: scaledPosition, size: overlayScaledSize)
+
+            layer.addSublayer(overlayLayer)
+            overlayImageLayers.append(overlayLayer)
         }
 
         CATransaction.commit()
@@ -322,11 +319,30 @@ public class LIVACanvasView: UIView {
         }
     }
 
-    /// Update the overlay frame
+    /// Update the overlay frame (legacy method - single overlay)
     func setOverlayFrame(_ image: UIImage?, at position: CGPoint) {
-        overlayFrame = image
-        overlayPosition = position
+        if let image = image {
+            overlayFrames = [(image, CGRect(origin: position, size: image.size))]
+        } else {
+            overlayFrames = []
+        }
         if useLayerRendering {
+            renderWithLayers()
+        } else {
+            setNeedsDisplay()
+        }
+    }
+
+    /// Render frame with base + multiple overlays (NEW - used by LIVAAnimationEngine)
+    /// - Parameters:
+    ///   - base: Base animation frame
+    ///   - overlays: Array of (overlay image, rect) pairs
+    func renderFrame(base: UIImage, overlays: [(image: UIImage, frame: CGRect)]) {
+        baseFrame = base
+        overlayFrames = overlays
+
+        if useLayerRendering {
+            updateContentLayout()
             renderWithLayers()
         } else {
             setNeedsDisplay()

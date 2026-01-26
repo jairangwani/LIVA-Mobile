@@ -1,0 +1,478 @@
+//
+//  LIVAAnimationEngine.swift
+//  LIVAAnimation
+//
+//  Created by Claude Code on 2026-01-26.
+//  Copyright © 2026 LIVA. All rights reserved.
+//
+
+import UIKit
+
+/// Core animation rendering engine
+/// Handles base animations + overlay frames (lip sync) with synchronized playback
+class LIVAAnimationEngine {
+
+    // MARK: - Properties
+
+    /// Current animation mode
+    private var mode: AnimationMode = .idle
+
+    /// Current base animation name
+    private var currentOverlayBaseName: String = "idle_1_s"
+
+    /// Global frame index (used in idle mode)
+    private var globalFrameIndex: Int = 0
+
+    /// Active overlay sections (chunks being played)
+    private var overlaySections: [OverlaySection] = []
+
+    /// Playback state for each section
+    private var overlayStates: [OverlayState] = []
+
+    /// Queue of overlays waiting to play
+    private var overlayQueue: [QueuedOverlay] = []
+
+    /// Is a set currently playing?
+    private var isSetPlaying: Bool = false
+
+    /// Image cache for overlay frames
+    private let imageCache = LIVAImageCache()
+
+    /// Base animation frames by name
+    private var animationFrames: [String: [UIImage]] = [:]
+
+    /// Expected frame counts from backend (authoritative)
+    private var expectedFrameCounts: [String: Int] = [:]
+
+    /// Display link for rendering loop
+    private var displayLink: CADisplayLink?
+
+    /// Last frame timestamp
+    private var lastFrameTime: CFTimeInterval = 0
+
+    /// Canvas view for rendering
+    private weak var canvasView: LIVACanvasView?
+
+    // MARK: - Constants
+
+    /// Idle animation frame rate (FPS)
+    private let idleFrameRate: Double = 10.0
+
+    /// Active animation frame rate (FPS) - overlay/transition modes
+    private let activeFrameRate: Double = 30.0
+
+    /// Default idle animation name
+    private let defaultIdleAnimation = "idle_1_s"
+
+    /// Minimum frames needed before starting playback (adaptive buffering)
+    private let minFramesBeforeStart = 10
+
+    /// Maximum wait time for buffer (milliseconds)
+    private let maxBufferWaitMs: Int = 3000
+
+    // MARK: - Initialization
+
+    init(canvasView: LIVACanvasView) {
+        self.canvasView = canvasView
+        print("[LIVAAnimationEngine] Initialized")
+    }
+
+    deinit {
+        stopRendering()
+    }
+
+    // MARK: - Public API
+
+    /// Start the rendering loop
+    func startRendering() {
+        guard displayLink == nil else {
+            print("[LIVAAnimationEngine] Already rendering")
+            return
+        }
+
+        displayLink = CADisplayLink(target: self, selector: #selector(draw))
+        displayLink?.add(to: .main, forMode: .common)
+        lastFrameTime = CACurrentMediaTime()
+
+        print("[LIVAAnimationEngine] ▶️ Started rendering")
+    }
+
+    /// Stop the rendering loop
+    func stopRendering() {
+        displayLink?.invalidate()
+        displayLink = nil
+
+        print("[LIVAAnimationEngine] ⏹️ Stopped rendering")
+    }
+
+    /// Load base animation frames
+    /// - Parameters:
+    ///   - name: Animation name (e.g., "idle_1_s")
+    ///   - frames: Array of UIImages
+    ///   - expectedCount: Expected frame count from backend (optional)
+    func loadBaseAnimation(name: String, frames: [UIImage], expectedCount: Int? = nil) {
+        animationFrames[name] = frames
+
+        if let count = expectedCount {
+            expectedFrameCounts[name] = count
+        }
+
+        print("[LIVAAnimationEngine] Loaded base animation: \(name), frames: \(frames.count), expected: \(expectedCount ?? frames.count)")
+    }
+
+    /// Enqueue overlay set for playback
+    /// - Parameters:
+    ///   - frames: Array of overlay frames
+    ///   - chunkIndex: Chunk index (0, 1, 2, ...)
+    ///   - animationName: Base animation name
+    ///   - totalFrames: Total frames in overlay sequence
+    func enqueueOverlaySet(frames: [OverlayFrame], chunkIndex: Int, animationName: String, totalFrames: Int) {
+        let section = OverlaySection(
+            mode: "lips_data",
+            frames: frames,
+            sectionIndex: 0,
+            chunkIndex: chunkIndex,
+            zoneTopLeft: .zero,
+            uniqueSetId: chunkIndex,
+            animationTotalFrames: totalFrames
+        )
+
+        let queued = QueuedOverlay(
+            section: section,
+            animationName: animationName
+        )
+
+        overlayQueue.append(queued)
+
+        print("[LIVAAnimationEngine] 📦 Enqueued overlay chunk \(chunkIndex), frames: \(frames.count), queue length: \(overlayQueue.count)")
+
+        // Start playback if not already playing
+        if !isSetPlaying {
+            startNextOverlaySetIfAny()
+        }
+    }
+
+    /// Cache overlay image for later playback
+    /// - Parameters:
+    ///   - image: Overlay image
+    ///   - key: Cache key (format: "chunkIndex_sectionIndex_sequenceIndex")
+    ///   - chunkIndex: Chunk index for batch eviction
+    func cacheOverlayImage(_ image: UIImage, forKey key: String, chunkIndex: Int) {
+        imageCache.setImage(image, forKey: key, chunkIndex: chunkIndex)
+    }
+
+    /// Reset to idle state
+    func reset() {
+        mode = .idle
+        currentOverlayBaseName = defaultIdleAnimation
+        globalFrameIndex = 0
+        overlaySections.removeAll()
+        overlayStates.removeAll()
+        overlayQueue.removeAll()
+        isSetPlaying = false
+        imageCache.clearAll()
+
+        print("[LIVAAnimationEngine] 🔄 Reset to idle")
+    }
+
+    // MARK: - Rendering Loop
+
+    @objc private func draw(link: CADisplayLink) {
+        let now = link.timestamp
+        let elapsed = now - lastFrameTime
+
+        // Throttle to 30 FPS (overlay/transition) or 10 FPS (idle)
+        let isIdleMode = mode == .idle
+        let frameDuration = isIdleMode ? (1.0 / idleFrameRate) : (1.0 / activeFrameRate)
+
+        guard elapsed >= frameDuration else { return }
+
+        lastFrameTime = now
+
+        // 1. Determine base frame to draw
+        let baseImage: UIImage?
+        if let overlayDriven = getOverlayDrivenBaseFrame() {
+            // ═══ OVERLAY MODE: Use overlay's exact base frame requirement ═══
+            if overlayDriven.shouldStartPlaying {
+                overlayStates[overlayDriven.sectionIndex].playing = true
+                overlayStates[overlayDriven.sectionIndex].currentDrawingFrame = 0
+                overlayStates[overlayDriven.sectionIndex].skipFirstAdvance = true
+                overlayStates[overlayDriven.sectionIndex].startTime = now
+                mode = .overlay
+
+                print("[LIVAAnimationEngine] 🎬 Starting overlay chunk \(overlayDriven.chunkIndex)")
+            }
+
+            // Switch base animation if needed
+            if overlayDriven.animationName != currentOverlayBaseName {
+                currentOverlayBaseName = overlayDriven.animationName
+                print("[LIVAAnimationEngine] 🔄 Switched base animation to: \(currentOverlayBaseName)")
+            }
+
+            // Get base frames for current animation
+            let baseFrames = animationFrames[currentOverlayBaseName] ?? []
+            baseImage = baseFrames[safe: overlayDriven.frameIndex]
+            globalFrameIndex = overlayDriven.frameIndex
+
+        } else {
+            // ═══ IDLE MODE: No overlay active, use independent counter ═══
+            var baseFrames = animationFrames[currentOverlayBaseName] ?? []
+
+            if baseFrames.isEmpty {
+                currentOverlayBaseName = defaultIdleAnimation
+                baseFrames = animationFrames[defaultIdleAnimation] ?? []
+            }
+
+            baseImage = baseFrames[safe: globalFrameIndex]
+        }
+
+        // 2. Collect overlay images to draw
+        var overlaysToRender: [(image: UIImage, frame: CGRect)] = []
+
+        if mode == .overlay {
+            for (index, section) in overlaySections.enumerated() {
+                let state = overlayStates[index]
+
+                guard state.playing, !state.done else { continue }
+
+                let overlayFrame = section.frames[state.currentDrawingFrame]
+                let key = getOverlayKey(
+                    chunkIndex: section.chunkIndex,
+                    sectionIndex: section.sectionIndex,
+                    sequenceIndex: state.currentDrawingFrame
+                )
+
+                if let overlayImage = imageCache.getImage(forKey: key) {
+                    overlaysToRender.append((overlayImage, overlayFrame.coordinates))
+                } else {
+                    // Missing overlay frame - log warning
+                    if state.currentDrawingFrame % 10 == 0 {
+                        print("[LIVAAnimationEngine] ⚠️ Missing overlay frame: \(key)")
+                    }
+                }
+            }
+        }
+
+        // 3. Render frame to canvas
+        if let baseImage = baseImage {
+            canvasView?.renderFrame(base: baseImage, overlays: overlaysToRender)
+        }
+
+        // 4. Advance frame counters
+        if mode == .overlay {
+            advanceOverlays()
+            cleanupOverlays()
+        } else if mode == .idle {
+            advanceIdleFrame()
+        }
+    }
+
+    // MARK: - Frame Synchronization
+
+    /// Get which base frame to display based on overlay data
+    /// This is the SINGLE SOURCE OF TRUTH for base frame selection in overlay mode
+    private func getOverlayDrivenBaseFrame() -> OverlayDrivenFrame? {
+        // Find first playing or ready-to-start overlay section
+        for (index, section) in overlaySections.enumerated() {
+            let state = overlayStates[index]
+
+            // If already playing, use its current frame requirement
+            if state.playing {
+                let overlayFrame = section.frames[state.currentDrawingFrame]
+                let baseFrameCount = getBaseFrameCount(for: section.frames[0].animationName)
+                let baseFrameIndex = overlayFrame.matchedSpriteFrameNumber % baseFrameCount
+
+                return OverlayDrivenFrame(
+                    animationName: section.frames[0].animationName,
+                    frameIndex: baseFrameIndex,
+                    sectionIndex: index,
+                    shouldStartPlaying: false,
+                    chunkIndex: section.chunkIndex
+                )
+            }
+
+            // Check if ready to start (first frame decoded)
+            if !state.playing && !state.done && isFirstOverlayFrameReady(section) {
+                let overlayFrame = section.frames[0]
+                let baseFrameCount = getBaseFrameCount(for: section.frames[0].animationName)
+                let baseFrameIndex = overlayFrame.matchedSpriteFrameNumber % baseFrameCount
+
+                return OverlayDrivenFrame(
+                    animationName: section.frames[0].animationName,
+                    frameIndex: baseFrameIndex,
+                    sectionIndex: index,
+                    shouldStartPlaying: true, // Signal to start playing
+                    chunkIndex: section.chunkIndex
+                )
+            }
+        }
+
+        return nil // No overlay active, use idle mode
+    }
+
+    /// Check if first overlay frame is ready to play
+    private func isFirstOverlayFrameReady(_ section: OverlaySection) -> Bool {
+        guard !section.frames.isEmpty else { return false }
+
+        let key = getOverlayKey(
+            chunkIndex: section.chunkIndex,
+            sectionIndex: section.sectionIndex,
+            sequenceIndex: 0
+        )
+
+        return imageCache.hasImage(forKey: key)
+    }
+
+    /// Get base frame count for animation
+    private func getBaseFrameCount(for animationName: String) -> Int {
+        if let expectedCount = expectedFrameCounts[animationName] {
+            return expectedCount
+        }
+        return animationFrames[animationName]?.count ?? 1
+    }
+
+    // MARK: - Frame Advancement
+
+    /// Advance overlay frame counters
+    private func advanceOverlays() {
+        for (index, section) in overlaySections.enumerated() {
+            var state = overlayStates[index]
+
+            guard state.playing && !state.done else { continue }
+
+            // Skip first advance to sync with base frame
+            if state.skipFirstAdvance {
+                state.skipFirstAdvance = false
+                overlayStates[index] = state
+                continue
+            }
+
+            // Advance overlay frame counter
+            state.currentDrawingFrame += 1
+
+            if state.currentDrawingFrame >= section.frames.count {
+                state.playing = false
+                state.done = true
+
+                print("[LIVAAnimationEngine] ✅ Overlay chunk \(section.chunkIndex) finished")
+            }
+
+            overlayStates[index] = state
+        }
+    }
+
+    /// Advance idle frame counter
+    private func advanceIdleFrame() {
+        let baseFrames = animationFrames[currentOverlayBaseName] ?? []
+        guard !baseFrames.isEmpty else { return }
+
+        globalFrameIndex = (globalFrameIndex + 1) % baseFrames.count
+    }
+
+    // MARK: - Cleanup & Queue Management
+
+    /// Remove finished overlays and start next in queue
+    private func cleanupOverlays() {
+        let activeSections = overlaySections.enumerated().filter { index, _ in
+            !overlayStates[index].done
+        }
+
+        if activeSections.count != overlaySections.count {
+            // Get completed chunk indices for cleanup
+            let doneChunkIndices = Set(
+                overlaySections.enumerated()
+                    .filter { overlayStates[$0].done }
+                    .map { $1.chunkIndex }
+            )
+
+            // Async cleanup of images for completed chunks
+            DispatchQueue.global(qos: .background).async { [weak self] in
+                self?.imageCache.evictChunks(doneChunkIndices)
+            }
+
+            // Update active sections
+            overlaySections = activeSections.map { $1 }
+            overlayStates = activeSections.map { overlayStates[$0] }
+
+            if overlaySections.isEmpty {
+                isSetPlaying = false
+
+                // Start next chunk in queue (if any)
+                if !overlayQueue.isEmpty {
+                    print("[LIVAAnimationEngine] ▶️ Starting next chunk from queue")
+                    startNextOverlaySetIfAny()
+                } else {
+                    // All chunks done, return to idle
+                    mode = .idle
+                    print("[LIVAAnimationEngine] 💤 Returned to idle mode")
+                }
+            }
+        }
+    }
+
+    /// Start next overlay set from queue
+    private func startNextOverlaySetIfAny() {
+        guard !isSetPlaying && !overlayQueue.isEmpty else { return }
+
+        let queued = overlayQueue.removeFirst()
+
+        // Check if buffer is ready (adaptive buffering)
+        if !isBufferReady(queued.section) {
+            let waitedMs = Int((CACurrentMediaTime() - queued.queuedAt) * 1000)
+
+            if waitedMs < maxBufferWaitMs {
+                // Buffer not ready, re-queue and retry
+                print("[LIVAAnimationEngine] ⏳ Buffer not ready, waited \(waitedMs)ms, re-queueing")
+                overlayQueue.insert(queued, at: 0)
+
+                // Retry after 100ms
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    self?.startNextOverlaySetIfAny()
+                }
+                return
+            } else {
+                // Timeout exceeded, start anyway
+                print("[LIVAAnimationEngine] ⚠️ Buffer timeout (\(waitedMs)ms), starting anyway")
+            }
+        }
+
+        let state = OverlayState(
+            playing: false,
+            currentDrawingFrame: 0,
+            done: false,
+            audioStarted: false,
+            skipFirstAdvance: true,
+            startTime: nil
+        )
+
+        overlaySections = [queued.section]
+        overlayStates = [state]
+        isSetPlaying = true
+
+        print("[LIVAAnimationEngine] 🚀 Processed overlay set, chunk: \(queued.section.chunkIndex)")
+    }
+
+    /// Check if enough frames are ready to start playback (adaptive buffering)
+    private func isBufferReady(_ section: OverlaySection) -> Bool {
+        guard !section.frames.isEmpty else { return false }
+
+        let framesToCheck = min(section.frames.count, minFramesBeforeStart)
+        var readyCount = 0
+
+        for i in 0..<framesToCheck {
+            let key = getOverlayKey(
+                chunkIndex: section.chunkIndex,
+                sectionIndex: section.sectionIndex,
+                sequenceIndex: i
+            )
+
+            if imageCache.hasImage(forKey: key) {
+                readyCount += 1
+            } else {
+                break // Stop at first missing frame
+            }
+        }
+
+        return readyCount >= minFramesBeforeStart
+    }
+}
