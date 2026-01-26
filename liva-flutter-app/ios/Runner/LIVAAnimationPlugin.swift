@@ -77,7 +77,7 @@ public class LIVAAnimationPlugin: NSObject, FlutterPlugin {
         let resolution = args["resolution"] as? String ?? "512"
 
         let config = LIVAConfiguration(
-            serverUrl: serverUrl,
+            serverURL: serverUrl,
             userId: userId,
             agentId: agentId,
             instanceId: instanceId,

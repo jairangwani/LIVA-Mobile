@@ -1,0 +1,39 @@
+PODS:
+  - Flutter (1.0.0)
+  - LIVAAnimation (1.0.0):
+    - Socket.IO-Client-Swift (~> 16.0)
+  - shared_preferences_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - Socket.IO-Client-Swift (16.1.1):
+    - Starscream (~> 4.0.8)
+  - Starscream (4.0.8)
+
+DEPENDENCIES:
+  - Flutter (from `Flutter`)
+  - LIVAAnimation (from `../../liva-sdk-ios`)
+  - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
+
+SPEC REPOS:
+  trunk:
+    - Socket.IO-Client-Swift
+    - Starscream
+
+EXTERNAL SOURCES:
+  Flutter:
+    :path: Flutter
+  LIVAAnimation:
+    :path: "../../liva-sdk-ios"
+  shared_preferences_foundation:
+    :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
+
+SPEC CHECKSUMS:
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  LIVAAnimation: 4498e5e32b54a9c33f7683f80d9c8a1927a4acbc
+  shared_preferences_foundation: 9e1978ff2562383bd5676f64ec4e9aa8fa06a6f7
+  Socket.IO-Client-Swift: 3614bea82ba005df1c2ff01154f4004993e05ad7
+  Starscream: 19b5533ddb925208db698f0ac508a100b884a1b9
+
+PODFILE CHECKSUM: dccf45625f0d099c5a94c91e533f6ab9d1bd59fd
+
+COCOAPODS: 1.16.2
