@@ -83,10 +83,10 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
   Future<void> _setupTestUser() async {
     setState(() => _statusMessage = 'Setting up test user...');
 
-    // Auto-setup test user config
+    // Auto-setup test user config (use localhost for testing)
     await ref.read(appConfigProvider.notifier).setConfig(
       const UserConfig(
-        serverUrl: 'http://liva-test-alb-655341112.us-east-1.elb.amazonaws.com',
+        serverUrl: AppConfigConstants.backendUrl, // Use localhost:5003
         userId: 'test_user_mobile',
         agentId: '1',
       ),
