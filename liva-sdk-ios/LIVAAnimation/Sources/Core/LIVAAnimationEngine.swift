@@ -381,8 +381,8 @@ class LIVAAnimationEngine {
             // Get completed chunk indices for cleanup
             let doneChunkIndices = Set(
                 overlaySections.enumerated()
-                    .filter { overlayStates[$0].done }
-                    .map { $1.chunkIndex }
+                    .filter { overlayStates[$0.offset].done }
+                    .map { $0.element.chunkIndex }
             )
 
             // Async cleanup of images for completed chunks
@@ -391,8 +391,8 @@ class LIVAAnimationEngine {
             }
 
             // Update active sections
-            overlaySections = activeSections.map { $1 }
-            overlayStates = activeSections.map { overlayStates[$0] }
+            overlaySections = activeSections.map { $0.element }
+            overlayStates = activeSections.map { overlayStates[$0.offset] }
 
             if overlaySections.isEmpty {
                 isSetPlaying = false
