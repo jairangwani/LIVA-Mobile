@@ -98,6 +98,140 @@ if state.skipFirstAdvance {
 
 ---
 
+## CRITICAL ARCHITECTURE DIFFERENCES
+
+The following are **fundamental architectural differences** between web and iOS that MUST be addressed for the animation system to work correctly.
+
+### 10. **CRITICAL: No Idle Animation Pingpong (Missing)**
+
+**Web behavior:**
+```javascript
+// In idle mode, when animation ends:
+if (currentOverlayBaseNameRef.current === IDLE_ANIMATION) nextAnim = IDLE_BACK_ANIMATION;
+else if (currentOverlayBaseNameRef.current === IDLE_BACK_ANIMATION) nextAnim = IDLE_ANIMATION;
+// Alternates: idle_1_s_idle_1_e → idle_1_e_idle_1_s → idle_1_s_idle_1_e
+```
+
+**iOS behavior:**
+```swift
+// In advanceIdleFrame():
+if nextFrame >= baseFrames.count {
+    currentOverlayBaseName = defaultIdleAnimation  // Always resets to same animation
+    globalFrameIndex = 0
+}
+```
+
+**Problem:** iOS idle loops the SAME animation repeatedly instead of pingponging between `_s_e` and `_e_s` variants. This may look unnatural.
+
+---
+
+### 11. **CRITICAL: No Transition Animation Playback**
+
+**Web has sophisticated transition handling:**
+```javascript
+// When starting overlays from idle:
+if (modeRef.current === "idle" && transitionAnim && canUseFrames(transitionAnim)) {
+    currentOverlayBaseNameRef.current = transitionAnim;  // e.g., "idle_1_e_talking_1_s"
+    globalFrameIndexRef.current = 0;
+    modeRef.current = "transition";  // Play transition BEFORE overlays
+    pendingTransitionRef.current = { transitionAnim, targetAnim, pendingOverlay };
+    return;  // Don't start overlays yet
+}
+```
+
+**iOS does NOT have this:**
+- iOS has `ANIMATION_LOAD_ORDER` with transition animations defined
+- iOS has `AnimationMode.transition` enum case
+- **BUT there is NO CODE to actually play transition animations!**
+- iOS jumps directly from idle to overlay mode
+
+**Impact:** Animation will "pop" instead of smooth transition between idle and talking.
+
+---
+
+### 12. **CRITICAL: No finishingBase/returnTransition Modes**
+
+**Web state machine:**
+```
+idle → transition → overlay → finishingBase → returnTransition → idle
+```
+
+**iOS state machine:**
+```
+idle ↔ overlay (no intermediate states)
+```
+
+**Web's finishingBase mode:**
+```javascript
+// When overlays done but base animation hasn't finished all frames:
+modeRef.current = "finishingBase";
+pendingReturnTransitionRef.current = "talking_1_e_idle_1_s";
+// Continues playing base until it reaches end frame, THEN plays return transition
+```
+
+**Web's returnTransition mode:**
+```javascript
+// After finishingBase completes:
+currentOverlayBaseNameRef.current = "talking_1_e_idle_1_s";  // Return transition
+globalFrameIndexRef.current = 0;
+modeRef.current = "returnTransition";
+// Plays talking→idle transition, THEN goes to idle
+```
+
+**iOS does NOT have these modes!** It jumps directly to idle:
+```swift
+func transitionToIdle() {
+    mode = .idle
+    currentOverlayBaseName = defaultIdleAnimation  // JUMPS directly!
+    globalFrameIndex = 0
+}
+```
+
+**Impact:** Animation will "pop" from talking to idle instead of smooth transition.
+
+---
+
+### 13. **CRITICAL: No holdingLastFrame for Chunk Transitions**
+
+**Web behavior:**
+```javascript
+// In advanceOverlays, at last frame of chunk:
+if (overlayQueueRef.current.length > 0) {
+    if (!isBufferReady(nextSection)) {
+        state.holdingLastFrame = true;  // DON'T mark done yet
+        return;  // Keep showing last frame until buffer ready
+    }
+}
+```
+
+**iOS does NOT have this:**
+```swift
+if state.currentDrawingFrame >= section.frames.count {
+    state.playing = false
+    state.done = true  // Marks done immediately, no buffer check
+}
+```
+
+**Impact:** Gap/jitter between chunks if next chunk's buffer isn't ready.
+
+---
+
+### 14. **Idle FPS Difference (10fps vs 30fps)**
+
+| Platform | Idle FPS | Overlay FPS |
+|----------|----------|-------------|
+| **Web** | 10 fps | 30 fps |
+| **iOS** | 30 fps | 30 fps |
+
+**iOS code (line 141-142):**
+```swift
+private let idleFrameDuration: CFTimeInterval = 1.0 / 30.0  // 30 FPS for idle
+```
+
+**Impact:** iOS uses 3x more CPU for idle animation. Not a bug, but inefficient.
+
+---
+
 ## Issues Identified
 
 ### 1. **CRITICAL: Positional Cache Keys Instead of overlay_id**
@@ -411,12 +545,239 @@ const baseFrameIndex = Number(overlayFrame.matched_sprite_frame_number || 0);
 
 ---
 
+## Phase 6: Idle Animation Pingpong (Medium Priority)
+
+**Files to modify:**
+1. `LIVAAnimationEngine.swift` - `advanceIdleFrame()`
+
+**Steps:**
+1. Add `alternateIdleAnimation` constant (`idle_1_e_idle_1_s`)
+2. In `advanceIdleFrame()`, when animation ends:
+   ```swift
+   if nextFrame >= baseFrames.count {
+       // Switch to alternate idle animation (pingpong)
+       let nextAnim: String
+       if currentOverlayBaseName == "idle_1_s_idle_1_e" {
+           nextAnim = "idle_1_e_idle_1_s"
+       } else {
+           nextAnim = "idle_1_s_idle_1_e"
+       }
+       if animationFrames[nextAnim]?.count > 0 {
+           currentOverlayBaseName = nextAnim
+           globalFrameIndex = 0
+       } else {
+           globalFrameIndex = 0  // Fallback: loop same animation
+       }
+   }
+   ```
+3. Test idle animation looks natural (no "pop" at loop boundary)
+
+---
+
+## Phase 7: Transition Animation Playback (HIGH PRIORITY)
+
+**Files to modify:**
+1. `LIVAAnimationEngine.swift` - `startNextOverlaySetIfAny()`
+
+**Steps:**
+1. Add `pendingTransitionRef` to store pending overlay during transition
+2. Add `getTransitionAnimation()` function:
+   ```swift
+   func getTransitionAnimation(from: String, to: String) -> String? {
+       // Extract base state names
+       let fromMatch = from.prefix(while: { $0 != "_" }) + "_" + from[...]
+       // Return: e.g., "idle_1_e_talking_1_s" or "talking_1_e_idle_1_s"
+   }
+   ```
+3. In `startNextOverlaySetIfAny()`, BEFORE starting overlays:
+   ```swift
+   if mode == .idle {
+       let transitionAnim = getTransitionAnimation(from: currentOverlayBaseName, to: animation_name)
+       if let trans = transitionAnim, animationFrames[trans]?.count > 0 {
+           // Play transition FIRST
+           currentOverlayBaseName = trans
+           globalFrameIndex = 0
+           mode = .transition
+           pendingTransitionRef = pendingOverlay  // Store overlay for later
+           return  // Don't start overlay yet
+       }
+   }
+   ```
+4. In draw loop, when `mode == .transition`:
+   ```swift
+   if mode == .transition {
+       // Check if transition animation finished
+       if globalFrameIndex >= animationFrames[currentOverlayBaseName]?.count ?? 0 {
+           // Transition done - now start the pending overlay
+           mode = .overlay
+           // ... start pending overlay
+       }
+   }
+   ```
+5. Test: idle → talking transition plays smoothly
+
+---
+
+## Phase 8: finishingBase and returnTransition Modes (HIGH PRIORITY)
+
+**Files to modify:**
+1. `LIVAAnimationEngine.swift` - `cleanupOverlays()`, draw loop
+2. `LIVAAnimationTypes.swift` - Add modes to enum
+
+**Steps:**
+1. Add new AnimationMode cases:
+   ```swift
+   enum AnimationMode {
+       case idle
+       case overlay
+       case transition
+       case finishingBase      // NEW: Waiting for base animation to finish
+       case returnTransition   // NEW: Playing talking→idle transition
+   }
+   ```
+
+2. Add tracking refs:
+   ```swift
+   private var pendingReturnTransition: String? = nil
+   private var finishingBaseTargetFrame: Int? = nil
+   ```
+
+3. In `cleanupOverlays()`, when all overlays done:
+   ```swift
+   if active.isEmpty && overlayQueue.isEmpty {
+       // Calculate return transition
+       let returnTransitionAnim = getTransitionAnimation(from: currentOverlayBaseName, to: "idle_1_s_idle_1_e")
+
+       if let returnAnim = returnTransitionAnim {
+           let targetFrameCount = animationFrames[currentOverlayBaseName]?.count ?? 0
+
+           if globalFrameIndex < targetFrameCount - 1 {
+               // Base not finished - enter finishingBase mode
+               mode = .finishingBase
+               pendingReturnTransition = returnAnim
+               finishingBaseTargetFrame = targetFrameCount
+           } else if animationFrames[returnAnim]?.count > 0 {
+               // Base finished, return transition loaded - play it
+               currentOverlayBaseName = returnAnim
+               globalFrameIndex = 0
+               mode = .returnTransition
+           }
+       } else {
+           // No transition - go directly to idle
+           transitionToIdle()
+       }
+   }
+   ```
+
+4. In draw loop, handle finishingBase:
+   ```swift
+   if mode == .finishingBase {
+       let targetCount = finishingBaseTargetFrame ?? baseFrames.count
+       let next = globalFrameIndex + 1
+
+       if next >= targetCount {
+           // Base finished - play return transition
+           if let returnAnim = pendingReturnTransition,
+              animationFrames[returnAnim]?.count > 0 {
+               currentOverlayBaseName = returnAnim
+               globalFrameIndex = 0
+               mode = .returnTransition
+               pendingReturnTransition = nil
+               finishingBaseTargetFrame = nil
+           } else {
+               transitionToIdle()
+           }
+       } else {
+           globalFrameIndex = next
+       }
+   }
+   ```
+
+5. In draw loop, handle returnTransition:
+   ```swift
+   if mode == .returnTransition {
+       let targetCount = baseFrames.count
+       let next = globalFrameIndex + 1
+
+       if next >= targetCount {
+           transitionToIdle()
+       } else {
+           globalFrameIndex = next
+       }
+   }
+   ```
+
+6. Test: talking → idle plays full base animation, then transition, then idle
+
+---
+
+## Phase 9: holdingLastFrame for Chunk Transitions (HIGH PRIORITY)
+
+**Files to modify:**
+1. `LIVAAnimationTypes.swift` - Add `holdingLastFrame` to OverlayState
+2. `LIVAAnimationEngine.swift` - `advanceOverlays()`
+
+**Steps:**
+1. Add to OverlayState:
+   ```swift
+   var holdingLastFrame: Bool = false
+   ```
+
+2. In `advanceOverlays()`, at last frame check:
+   ```swift
+   let isLastFrame = state.currentDrawingFrame >= section.frames.count - 1
+
+   if isLastFrame {
+       // Check if next chunk buffer is ready
+       if !overlayQueue.isEmpty {
+           let nextChunk = overlayQueue.first!
+           if !isBufferReady(nextChunk.section) {
+               // Buffer NOT ready - hold at last frame
+               state.holdingLastFrame = true
+               animLog("⏸️ HOLDING: Chunk \(section.chunkIndex) waiting for next chunk buffer")
+               return  // Don't mark done yet
+           }
+       }
+
+       // Buffer ready (or no more chunks) - mark done
+       state.playing = false
+       state.done = true
+       state.holdingLastFrame = false
+   }
+   ```
+
+3. In `advanceOverlays()`, skip if holding:
+   ```swift
+   if state.holdingLastFrame {
+       return  // Stay on last frame
+   }
+   ```
+
+4. Test: No gap between chunks even on slow network
+
+---
+
+## Phase 10: Idle FPS Optimization (LOW PRIORITY)
+
+**Files to modify:**
+1. `LIVAAnimationEngine.swift` - Change idle frame duration
+
+**Steps:**
+1. Change idle frame rate from 30fps to 10fps:
+   ```swift
+   private let idleFrameDuration: CFTimeInterval = 1.0 / 10.0  // 10 FPS for idle (was 30)
+   ```
+
+2. Test idle animation still looks smooth at lower FPS
+
+---
+
 ## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `LIVAAnimationTypes.swift` | Add `getContentKey()`, remove `skipFirstAdvance` from OverlayState |
-| `LIVAAnimationEngine.swift` | Use overlay_id for lookups, remove skipFirstAdvance logic, add frame skip, fix per-frame animation name |
+| `LIVAAnimationTypes.swift` | Add `getContentKey()`, remove `skipFirstAdvance`, add `holdingLastFrame`, add new AnimationMode cases |
+| `LIVAAnimationEngine.swift` | **MAJOR REWRITE**: Use overlay_id, remove skipFirstAdvance, fix per-frame animation name, add transition/finishingBase/returnTransition modes, add holdingLastFrame logic, idle pingpong |
 | `LIVAImageCache.swift` | Add decoded tracking, `isImageReady()`, `clearDecodedStatus()` |
 | `LIVAClient.swift` | Use overlay_id when caching images |
 | `LIVACanvasView.swift` | Debug gesture (optional) |
@@ -485,6 +846,20 @@ npm run test:ios:e2e      # Run iOS E2E tests
 - [ ] Frame sync logs show matching base/overlay indices
 - [ ] Smooth playback at 30 FPS
 
+### Animation Transitions (NEW - CRITICAL)
+- [ ] Idle animation pingpongs between `_s_e` and `_e_s` variants
+- [ ] Transition animation plays when going idle → talking (e.g., `idle_1_e_talking_1_s`)
+- [ ] Transition animation plays when going talking → idle (e.g., `talking_1_e_idle_1_s`)
+- [ ] `finishingBase` mode waits for base animation to complete before return transition
+- [ ] `returnTransition` mode plays the talking→idle transition
+- [ ] `holdingLastFrame` prevents gaps between chunks
+- [ ] No "pop" when entering or exiting talking mode
+
+### State Machine
+- [ ] `AnimationMode` enum has: idle, overlay, transition, finishingBase, returnTransition
+- [ ] State transitions match web: idle → transition → overlay → finishingBase → returnTransition → idle
+- [ ] Each mode handled correctly in draw loop
+
 ---
 
 ## Risk Assessment
@@ -497,6 +872,41 @@ npm run test:ios:e2e      # Run iOS E2E tests
 | Skip frame logic | Animation stutter | Only skips if overlay truly not ready |
 | Per-frame animation name | Wrong base frames briefly | Test mid-chunk transitions |
 | Modulo removal (if done) | Index out of bounds | Add bounds check as safety |
+| **Idle pingpong** | Animation mismatch | Ensure both idle variants loaded |
+| **Transition playback** | **HIGH**: Breaks if transition not loaded | Check animation loaded before entering transition mode |
+| **finishingBase mode** | **HIGH**: Base may never finish | Add timeout fallback to idle |
+| **returnTransition mode** | **HIGH**: Transition may never load | Add timeout, fallback to idle |
+| **holdingLastFrame** | Stuck on last frame forever | Add max hold time, force advance |
+
+### High-Risk Mitigations
+
+**Transition animation not loaded:**
+```swift
+// Before entering transition mode:
+guard animationFrames[transitionAnim]?.count > 0 else {
+    // Fallback: skip transition, go directly to overlay
+    return
+}
+```
+
+**finishingBase never completes:**
+```swift
+// Add timeout in finishingBase mode:
+if timeInFinishingBase > 5.0 {  // 5 second timeout
+    animLog("⚠️ finishingBase timeout - forcing idle")
+    transitionToIdle()
+}
+```
+
+**holdingLastFrame stuck:**
+```swift
+// Add max hold time:
+if holdDuration > 1.0 {  // 1 second max
+    animLog("⚠️ holdingLastFrame timeout - marking done")
+    state.done = true
+    state.holdingLastFrame = false
+}
+```
 
 ---
 
@@ -512,15 +922,43 @@ Each change can be reverted independently:
 
 ## Timeline Estimate
 
+### Bug Fixes (MUST DO)
 - Phase 1 (Cache Keys): 2-3 hours
 - Phase 2 (skipFirstAdvance): 30 minutes
 - Phase 2.5 (Per-Frame Animation Name): 30 minutes
 - Phase 3 (Decode Tracking): 1 hour
 - Phase 4 (Skip Logic): 1 hour
-- Phase 5 (Debug Tools): 2 hours (optional)
-- Testing: 2-3 hours
 
-**Total: 9-11 hours**
+### Architecture Alignment (CRITICAL - Required for proper animation)
+- Phase 6 (Idle Pingpong): 30 minutes
+- Phase 7 (Transition Playback): 2-3 hours **HIGH PRIORITY**
+- Phase 8 (finishingBase/returnTransition): 3-4 hours **HIGH PRIORITY**
+- Phase 9 (holdingLastFrame): 1 hour **HIGH PRIORITY**
+
+### Optional Improvements
+- Phase 5 (Debug Tools): 2 hours
+- Phase 10 (Idle FPS Optimization): 30 minutes
+
+### Testing
+- Unit/Integration Testing: 2-3 hours
+- E2E Testing: 2-3 hours
+
+**Bug Fixes Only: 5-6 hours**
+**Full Implementation (Bug Fixes + Architecture): 16-20 hours**
+
+### Recommended Implementation Order
+
+1. **Phase 2** (skipFirstAdvance) - Quick win, removes jitter
+2. **Phase 2.5** (Per-Frame Animation Name) - Critical for correct base frames
+3. **Phase 9** (holdingLastFrame) - Prevents chunk gaps
+4. **Phase 1** (Cache Keys) - Better caching/deduplication
+5. **Phase 7** (Transition Playback) - Smooth idle→talking
+6. **Phase 8** (finishingBase/returnTransition) - Smooth talking→idle
+7. **Phase 6** (Idle Pingpong) - Natural idle animation
+8. **Phase 3** (Decode Tracking) - Prevents decode jitter
+9. **Phase 4** (Skip Logic) - Prevents rendering glitches
+10. **Phase 5** (Debug Tools) - Optional, for troubleshooting
+11. **Phase 10** (Idle FPS) - Optional, performance improvement
 
 ---
 
