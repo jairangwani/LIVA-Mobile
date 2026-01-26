@@ -8,7 +8,7 @@
 import UIKit
 
 /// Animation playback mode
-enum AnimationMode {
+enum LegacyAnimationMode {
     case idle       // 10 fps for idle animations
     case talking    // 30 fps for lip sync
     case transition // Transition between animations
