@@ -366,7 +366,7 @@ public class LIVACanvasView: UIView {
         guard displayLink == nil else { return }
 
         isRendering = true
-        displayLink = CADisplayLink(target: self, selector: #selector(renderFrame))
+        displayLink = CADisplayLink(target: self, selector: #selector(legacyRenderFrame))
 
         // Request 60fps but the animation engine controls actual frame rate
         if #available(iOS 15.0, *) {
@@ -390,7 +390,7 @@ public class LIVACanvasView: UIView {
         displayLink = nil
     }
 
-    @objc private func renderFrame(_ displayLink: CADisplayLink) {
+    @objc private func legacyRenderFrame(_ displayLink: CADisplayLink) {
         // Update FPS counter
         frameCount += 1
         let currentTime = CACurrentMediaTime()
@@ -400,16 +400,23 @@ public class LIVACanvasView: UIView {
             lastFPSTime = currentTime
         }
 
-        // Get next frame from animation engine
+        // Get next frame from animation engine (legacy)
         guard let engine = animationEngine,
               let frame = engine.getNextFrame() else {
             return
         }
 
-        // Update frames
+        // Update frames (legacy single overlay)
         baseFrame = frame.baseImage
-        overlayFrame = frame.overlayImage
-        overlayPosition = frame.overlayPosition
+        let legacyOverlayImage = frame.overlayImage
+        let legacyOverlayPosition = frame.overlayPosition
+
+        // Convert to new format
+        if let overlay = legacyOverlayImage {
+            overlayFrames = [(overlay, CGRect(origin: legacyOverlayPosition, size: overlay.size))]
+        } else {
+            overlayFrames = []
+        }
 
         // Render
         if useLayerRendering {
