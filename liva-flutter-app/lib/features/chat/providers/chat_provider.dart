@@ -85,6 +85,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
         Uri.parse('${AppConfigConstants.backendUrl}/messages'),
         headers: {
           'Content-Type': 'application/json',
+          'X-User-ID': config.userId, // Required by backend middleware
         },
         body: jsonEncode({
           'user_id': config.userId,
