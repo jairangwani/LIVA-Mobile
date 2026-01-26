@@ -223,6 +223,7 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
                 }
 
                 return ListView.builder(
+                  key: const Key('agent_list'),
                   padding: const EdgeInsets.all(16),
                   itemCount: agents.length,
                   itemBuilder: (context, index) {
@@ -230,6 +231,7 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
                     final isSelected = agent.id == currentAgentId;
 
                     return Card(
+                      key: Key('agent_card_$index'),
                       margin: const EdgeInsets.only(bottom: 12),
                       child: ListTile(
                         leading: CircleAvatar(

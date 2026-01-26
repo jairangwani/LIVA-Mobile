@@ -224,6 +224,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             child: AspectRatio(
               aspectRatio: 1.0,
               child: LIVAAnimationView(
+                key: const Key('avatar_canvas'),
                 showDebugOverlay: _showDebug,
                 loadingWidget: const Column(
                   mainAxisAlignment: MainAxisAlignment.center,

@@ -158,10 +158,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
                   // Guest login button
                   OutlinedButton(
+                    key: const Key('guest_login_button'),
                     onPressed: _isLoading ? null : _continueAsGuest,
                     child: const Padding(
                       padding: EdgeInsets.all(12),
-                      child: Text('Continue as Guest'),
+                      child: Text('Guest Login'),
                     ),
                   ),
                   const SizedBox(height: 24),

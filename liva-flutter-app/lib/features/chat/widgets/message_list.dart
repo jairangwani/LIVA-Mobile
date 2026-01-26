@@ -56,8 +56,10 @@ class _MessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final isUser = message.role == MessageRole.user;
     final isSystem = message.role == MessageRole.system;
+    final isAssistant = message.role == MessageRole.assistant;
 
     return Padding(
+      key: isAssistant ? const Key('agent_response') : null,
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         mainAxisAlignment:

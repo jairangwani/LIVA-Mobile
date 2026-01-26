@@ -32,6 +32,7 @@ class MessageInput extends StatelessWidget {
             // Text field
             Expanded(
               child: TextField(
+                key: const Key('message_input'),
                 controller: controller,
                 enabled: !isLoading,
                 decoration: InputDecoration(
@@ -69,6 +70,7 @@ class MessageInput extends StatelessWidget {
                       ),
                     )
                   : IconButton.filled(
+                      key: const Key('send_button'),
                       onPressed: () => onSend(controller.text),
                       icon: const Icon(Icons.send),
                     ),
