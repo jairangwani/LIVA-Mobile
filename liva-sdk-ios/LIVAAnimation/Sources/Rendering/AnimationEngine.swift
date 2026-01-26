@@ -90,7 +90,7 @@ final class AnimationEngine {
 
     // MARK: - Callbacks
 
-    var onModeChange: ((AnimationMode) -> Void)?
+    var onModeChange: ((LegacyAnimationMode) -> Void)?
     var onChunkComplete: ((Int) -> Void)?
     var onAnimationComplete: (() -> Void)?
 
