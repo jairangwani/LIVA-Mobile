@@ -12,8 +12,9 @@ final chatConfigProvider = StateProvider<LIVAConfig?>((ref) {
   final config = ref.watch(appConfigProvider);
   if (config == null) return null;
 
+  // TESTING: Always use the constant backend URL (ignores cached SharedPreferences)
   return LIVAConfig(
-    serverUrl: config.serverUrl,
+    serverUrl: AppConfigConstants.backendUrl,  // Use constant, not cached value
     userId: config.userId,
     agentId: config.agentId,
   );
@@ -79,9 +80,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
         throw Exception('App not configured');
       }
 
-      // Send to backend via HTTP POST
+      // Send to backend via HTTP POST (use constant URL, not cached)
       final response = await http.post(
-        Uri.parse('${config.serverUrl}/messages'),
+        Uri.parse('${AppConfigConstants.backendUrl}/messages'),
         headers: {
           'Content-Type': 'application/json',
         },

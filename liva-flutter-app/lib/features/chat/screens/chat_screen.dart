@@ -40,9 +40,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       await Future.delayed(const Duration(milliseconds: 200));
     }
 
-    // If config still null, use fallback test config
+    // If config still null, use fallback test config (localhost for testing)
     config ??= const LIVAConfig(
-      serverUrl: 'http://liva-test-alb-655341112.us-east-1.elb.amazonaws.com',
+      serverUrl: 'http://localhost:5003',
       userId: 'test_user_mobile',
       agentId: '1',
     );
