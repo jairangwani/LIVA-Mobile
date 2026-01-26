@@ -1,0 +1,31 @@
+appId: com.liva.livaApp
+---
+# Test sending message after X-User-ID fix
+
+# Wait for app to load
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/test_01_initial
+
+# Type message in the text field
+- tapOn:
+    text: "Type a message..."
+
+- inputText: "Hello Anna"
+
+- takeScreenshot: screenshots/test_02_typed
+
+# Tap send button (purple circle on right)
+- tapOn:
+    point: "92%,95%"
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/test_03_sent
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/test_04_response

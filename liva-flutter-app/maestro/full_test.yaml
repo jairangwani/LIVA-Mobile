@@ -1,0 +1,41 @@
+appId: com.liva.livaApp
+---
+# Full test: Navigate to chat and send message
+
+# Wait for app to load
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/full_01_agent_screen
+
+# Tap on chat icon (top right)
+- tapOn:
+    point: "93%,13%"
+
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/full_02_chat_screen
+
+# Tap on text input field (bottom of screen)
+- tapOn:
+    point: "40%,95%"
+
+- waitForAnimationToEnd
+
+- inputText: "Hello"
+
+- takeScreenshot: screenshots/full_03_typed
+
+# Tap send button
+- tapOn:
+    point: "92%,95%"
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/full_04_after_send
+
+- waitForAnimationToEnd
+- waitForAnimationToEnd
+
+- takeScreenshot: screenshots/full_05_final

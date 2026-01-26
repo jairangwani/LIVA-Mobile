@@ -71,11 +71,12 @@ class AppConfigNotifier extends StateNotifier<UserConfig?> {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('userId');
     final agentId = prefs.getString('agentId');
-    final serverUrl = prefs.getString('serverUrl');
+    // TESTING: Always use localhost, ignore cached serverUrl
+    // final serverUrl = prefs.getString('serverUrl');
 
     if (userId != null) {
       state = UserConfig(
-        serverUrl: serverUrl ?? AppConfigConstants.backendUrl,
+        serverUrl: AppConfigConstants.backendUrl, // FORCE localhost for testing
         userId: userId,
         agentId: agentId ?? AppConfigConstants.defaultAgentId,
       );
