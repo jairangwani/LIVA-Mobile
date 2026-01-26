@@ -49,7 +49,7 @@ final class AnimationEngine {
     // MARK: - Properties
 
     /// Current animation mode
-    private(set) var mode: AnimationMode = .idle {
+    private(set) var mode: LegacyAnimationMode = .idle {
         didSet {
             if oldValue != mode {
                 onModeChange?(mode)
@@ -156,7 +156,7 @@ final class AnimationEngine {
     }
 
     /// Set animation mode
-    func setMode(_ newMode: AnimationMode) {
+    func setMode(_ newMode: LegacyAnimationMode) {
         mode = newMode
     }
 
