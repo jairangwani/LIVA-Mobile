@@ -99,19 +99,16 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
     if (_autoSelectDone || agents.isEmpty) return;
     _autoSelectDone = true;
 
-    // Auto-select first agent and navigate to chat
+    // Auto-select first agent
     final agent = agents.first;
     debugPrint('AUTO-SELECT: Selecting agent ${agent.id} (${agent.name})');
 
     ref.read(appConfigProvider.notifier).setAgentId(agent.id);
 
-    // Navigate to chat after a brief delay
-    Future.delayed(const Duration(milliseconds: 500), () {
-      if (mounted) {
-        debugPrint('AUTO-SELECT: Navigating to chat...');
-        context.go('/chat');
-      }
-    });
+    // DON'T auto-navigate to chat - let user tap to navigate
+    // This prevents SDK initialization errors from blocking the agent screen
+    debugPrint('AUTO-SELECT: Agent selected. User can navigate to chat when ready.');
+    setState(() => _statusMessage = 'Agent "${agent.name}" selected. Tap chat icon to continue.');
   }
 
   @override

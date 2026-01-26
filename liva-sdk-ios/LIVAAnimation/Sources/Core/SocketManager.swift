@@ -100,25 +100,34 @@ final class LIVASocketManager {
 
         isManualDisconnect = false
 
-        // Configure Socket.IO manager
+        // Build connection parameters dictionary
+        // Backend (Flask-SocketIO) reads from request.args via Socket.IO GET parameters
+        let connectionParams: [String: Any] = [
+            "user_id": configuration.userId,
+            "agent_id": configuration.agentId,
+            "instance_id": configuration.instanceId,
+            "userResolution": configuration.resolution
+        ]
+
+        // Configure Socket.IO manager with connectParams (GET parameters)
+        // This is the correct way to pass parameters - Socket.IO adds them to the handshake URL
         manager = SocketIO.SocketManager(
             socketURL: url,
             config: [
-                .log(false),
+                .log(true), // Enable logging to debug connection issues
                 .compress,
+                .connectParams(connectionParams), // Pass as Socket.IO GET parameters
                 .forceWebsockets(false),
-                .reconnects(false), // We handle reconnection manually
-                .connectParams([
-                    "user_id": configuration.userId,
-                    "agent_id": configuration.agentId,
-                    "instance_id": configuration.instanceId,
-                    "userResolution": configuration.resolution
-                ])
+                .reconnects(false) // We handle reconnection manually
             ]
         )
 
         socket = manager?.defaultSocket
         setupEventHandlers()
+
+        print("[LIVASocketManager] Connecting to: \(url.absoluteString)")
+        print("[LIVASocketManager] Connection params: \(connectionParams)")
+
         socket?.connect()
     }
 
@@ -143,6 +152,7 @@ final class LIVASocketManager {
 
         // Connection events
         socket.on(clientEvent: .connect) { [weak self] _, _ in
+            print("[LIVASocketManager] ✅ Connected successfully!")
             self?.reconnectAttempts = 0
             self?.onConnect?()
         }
@@ -150,6 +160,7 @@ final class LIVASocketManager {
         socket.on(clientEvent: .disconnect) { [weak self] data, _ in
             guard let self = self else { return }
             let reason = (data.first as? String) ?? "unknown"
+            print("[LIVASocketManager] ❌ Disconnected. Reason: \(reason)")
             self.onDisconnect?(reason)
 
             if !self.isManualDisconnect {
@@ -159,7 +170,21 @@ final class LIVASocketManager {
 
         socket.on(clientEvent: .error) { [weak self] data, _ in
             let errorMessage = (data.first as? String) ?? "Unknown socket error"
+            print("[LIVASocketManager] ❌ Socket error: \(errorMessage)")
+            print("[LIVASocketManager] Error data: \(data)")
             self?.onError?(LIVAError.connectionFailed(errorMessage))
+        }
+
+        socket.on(clientEvent: .statusChange) { [weak self] data, _ in
+            print("[LIVASocketManager] Status change: \(data)")
+        }
+
+        socket.on(clientEvent: .reconnect) { [weak self] data, _ in
+            print("[LIVASocketManager] Reconnecting...")
+        }
+
+        socket.on(clientEvent: .reconnectAttempt) { [weak self] data, _ in
+            print("[LIVASocketManager] Reconnect attempt...")
         }
 
         // Audio event

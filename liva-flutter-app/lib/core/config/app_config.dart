@@ -3,8 +3,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Application configuration constants.
 class AppConfigConstants {
-  /// Backend server URL (AWS)
-  static const String backendUrl = 'http://liva-test-alb-655341112.us-east-1.elb.amazonaws.com';
+  /// Backend server URL (Local for testing)
+  static const String backendUrl = 'http://localhost:5003';
 
   /// Default agent ID
   static const String defaultAgentId = '1';
