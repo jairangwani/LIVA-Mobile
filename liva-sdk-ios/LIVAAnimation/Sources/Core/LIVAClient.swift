@@ -59,7 +59,8 @@ public final class LIVAClient {
 
     private var socketManager: LIVASocketManager?
     private var frameDecoder: FrameDecoder?
-    private var animationEngine: AnimationEngine?
+    private var animationEngine: AnimationEngine? // OLD - Legacy support
+    private var newAnimationEngine: LIVAAnimationEngine? // NEW - Base + overlay rendering
     private var audioPlayer: AudioPlayer?
     private var baseFrameManager: BaseFrameManager?
     private weak var canvasView: LIVACanvasView?
@@ -83,9 +84,13 @@ public final class LIVAClient {
 
         // Initialize components
         frameDecoder = FrameDecoder()
-        animationEngine = AnimationEngine()
+        animationEngine = AnimationEngine() // OLD - Legacy support
         audioPlayer = AudioPlayer()
         baseFrameManager = BaseFrameManager()
+
+        // NEW - Initialize new animation engine (will replace old one)
+        // Note: Needs canvas view to be attached first
+        // Will be initialized in attachView()
 
         setupAnimationEngineCallbacks()
         setupAudioPlayerCallbacks()
@@ -99,7 +104,12 @@ public final class LIVAClient {
     /// - Parameter view: The canvas view to render to
     public func attachView(_ view: LIVACanvasView) {
         self.canvasView = view
-        view.animationEngine = animationEngine
+        view.animationEngine = animationEngine // OLD - Legacy support
+
+        // NEW - Initialize new animation engine with canvas view
+        newAnimationEngine = LIVAAnimationEngine(canvasView: view)
+
+        print("[LIVAClient] ✅ Attached canvas view and initialized new animation engine")
     }
 
     /// Connect to the backend server
@@ -122,6 +132,8 @@ public final class LIVAClient {
         canvasView?.stopRenderLoop()
         audioPlayer?.stop()
         animationEngine?.clearQueue()
+        newAnimationEngine?.stopRendering() // NEW
+        newAnimationEngine?.reset() // NEW
         socketManager?.disconnect()
         socketManager = nil
         state = .idle
@@ -183,6 +195,15 @@ public final class LIVAClient {
 
         socket.onAnimationFramesComplete = { [weak self] animationName in
             self?.handleAnimationFramesComplete(animationName)
+        }
+
+        // NEW - Animation engine events (chunk streaming)
+        socket.onAnimationChunkMetadata = { [weak self] dict in
+            self?.handleAnimationChunkMetadata(dict)
+        }
+
+        socket.onFrameImageReceived = { [weak self] dict in
+            self?.handleFrameImageReceived(dict)
         }
     }
 
@@ -323,6 +344,119 @@ public final class LIVAClient {
             isBaseFramesLoaded = true
             notifyIdleReady()
         }
+
+        // NEW - Also load into new animation engine
+        if let frames = baseFrameManager?.getFrames(for: animationName) {
+            let expectedCount = baseFrameManager?.getTotalFrames(for: animationName) ?? frames.count
+            newAnimationEngine?.loadBaseAnimation(
+                name: animationName,
+                frames: frames,
+                expectedCount: expectedCount
+            )
+
+            print("[LIVAClient] ✅ Loaded base animation into new engine: \(animationName), frames: \(frames.count)")
+
+            // Start rendering if this is the idle animation
+            if animationName == "idle_1_s_idle_1_e" {
+                newAnimationEngine?.startRendering()
+                print("[LIVAClient] ▶️ Started new animation engine rendering")
+            }
+        }
+    }
+
+    // NEW - Handle animation chunk metadata
+    private func handleAnimationChunkMetadata(_ dict: [String: Any]) {
+        guard let chunkIndex = dict["chunk_index"] as? Int,
+              let totalFrames = dict["total_frame_images"] as? Int,
+              let sectionsArray = dict["sections"] as? [[String: Any]] else {
+            print("[LIVAClient] ⚠️ Invalid animation_chunk_metadata format")
+            return
+        }
+
+        print("[LIVAClient] 📦 Received chunk metadata: chunk \(chunkIndex), total frames: \(totalFrames)")
+
+        // Parse overlay frames from sections
+        var overlayFrames: [OverlayFrame] = []
+
+        for (sectionIdx, sectionDict) in sectionsArray.enumerated() {
+            guard let framesArray = sectionDict["frames"] as? [[String: Any]] else { continue }
+
+            for (seqIdx, frameDict) in framesArray.enumerated() {
+                // Parse coordinates
+                let coordinates = parseCoordinates(frameDict["coordinates"])
+
+                let frame = OverlayFrame(
+                    matchedSpriteFrameNumber: frameDict["matched_sprite_frame_number"] as? Int ?? 0,
+                    sheetFilename: frameDict["sheet_filename"] as? String ?? "",
+                    coordinates: coordinates,
+                    imageData: nil, // Will be filled via receive_frame_image
+                    sequenceIndex: seqIdx,
+                    animationName: frameDict["animation_name"] as? String ?? "",
+                    originalFrameIndex: frameDict["frame_index"] as? Int ?? 0,
+                    overlayId: frameDict["overlay_id"] as? String,
+                    char: frameDict["char"] as? String,
+                    viseme: frameDict["viseme"] as? String
+                )
+                overlayFrames.append(frame)
+            }
+        }
+
+        // Get animation name from first section
+        let animationName = sectionsArray.first?["animation_name"] as? String ?? "talking_1_s_talking_1_e"
+
+        // Enqueue for playback
+        newAnimationEngine?.enqueueOverlaySet(
+            frames: overlayFrames,
+            chunkIndex: chunkIndex,
+            animationName: animationName,
+            totalFrames: totalFrames
+        )
+
+        print("[LIVAClient] ✅ Enqueued overlay chunk \(chunkIndex), frames: \(overlayFrames.count)")
+    }
+
+    // NEW - Handle individual frame image
+    private func handleFrameImageReceived(_ dict: [String: Any]) {
+        guard let chunkIndex = dict["chunk_index"] as? Int,
+              let sectionIndex = dict["section_index"] as? Int,
+              let sequenceIndex = dict["sequence_index"] as? Int else {
+            print("[LIVAClient] ⚠️ Invalid receive_frame_image format")
+            return
+        }
+
+        // Decode image data (could be base64 string or binary Data)
+        var imageData: Data?
+
+        if let dataString = dict["image_data"] as? String {
+            // Base64 encoded
+            imageData = Data(base64Encoded: dataString)
+        } else if let dataBinary = dict["image_data"] as? Data {
+            // Binary data
+            imageData = dataBinary
+        }
+
+        guard let data = imageData,
+              let image = UIImage(data: data) else {
+            print("[LIVAClient] ⚠️ Failed to decode overlay image for chunk \(chunkIndex)")
+            return
+        }
+
+        // Cache for later playback
+        let key = getOverlayKey(
+            chunkIndex: chunkIndex,
+            sectionIndex: sectionIndex,
+            sequenceIndex: sequenceIndex
+        )
+
+        newAnimationEngine?.cacheOverlayImage(image, forKey: key, chunkIndex: chunkIndex)
+    }
+
+    // Helper: Parse coordinates array to CGRect
+    private func parseCoordinates(_ coordArray: Any?) -> CGRect {
+        guard let coords = coordArray as? [CGFloat], coords.count == 4 else {
+            return .zero
+        }
+        return CGRect(x: coords[0], y: coords[1], width: coords[2], height: coords[3])
     }
 
     // MARK: - Base Frame Manager Callbacks
@@ -379,6 +513,8 @@ public final class LIVAClient {
     @objc private func handleMemoryWarning() {
         frameDecoder?.handleMemoryWarning()
         animationEngine?.clearQueue()
+        // NEW - Reset new engine on memory warning
+        newAnimationEngine?.reset()
     }
 
     // MARK: - Cleanup

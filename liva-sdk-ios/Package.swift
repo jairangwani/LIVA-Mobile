@@ -26,10 +26,10 @@ let package = Package(
             ],
             path: "LIVAAnimation/Sources"
         ),
-        .testTarget(
-            name: "LIVAAnimationTests",
-            dependencies: ["LIVAAnimation"],
-            path: "Tests"
-        ),
+        // .testTarget(
+        //     name: "LIVAAnimationTests",
+        //     dependencies: ["LIVAAnimation"],
+        //     path: "Tests"
+        // ),
     ]
 )

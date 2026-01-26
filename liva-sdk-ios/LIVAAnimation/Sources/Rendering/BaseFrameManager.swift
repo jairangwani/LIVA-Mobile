@@ -258,6 +258,18 @@ final class BaseFrameManager {
         return animations[animationName]?.totalFrames ?? 0
     }
 
+    /// Get all frames for an animation (NEW - for LIVAAnimationEngine)
+    func getFrames(for animationName: String) -> [UIImage] {
+        animationLock.lock()
+        defer { animationLock.unlock() }
+        return animations[animationName]?.frames.filter { $0.size.width > 0 } ?? []
+    }
+
+    /// Get total frames (alias for compatibility)
+    func getTotalFrames(for animationName: String) -> Int {
+        return totalFrames(for: animationName)
+    }
+
     // MARK: - Disk Cache
 
     private func cacheAnimationToDisk(name: String) {
