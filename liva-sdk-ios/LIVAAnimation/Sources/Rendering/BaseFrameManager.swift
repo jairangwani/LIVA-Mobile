@@ -8,13 +8,25 @@
 import UIKit
 
 /// Animation loading priority order (matches frontend)
+/// Includes both talking_1 and talking_2 variants as backend may use either
 let ANIMATION_LOAD_ORDER: [String] = [
+    // Idle animations (highest priority - unlocks UI)
     "idle_1_s_idle_1_e",           // First priority - unlocks UI
     "idle_1_e_idle_1_s",           // Idle loop pair
-    "idle_1_e_talking_1_s",        // Transition: idle -> talking
-    "talking_1_s_talking_1_e",     // Main talking animation
-    "talking_1_e_idle_1_s",        // Transition: talking -> idle
-    "talking_1_e_talking_1_s",     // Talking loop
+
+    // Talking_1 animations
+    "idle_1_e_talking_1_s",        // Transition: idle -> talking_1
+    "talking_1_s_talking_1_e",     // Main talking_1 animation
+    "talking_1_e_idle_1_s",        // Transition: talking_1 -> idle
+    "talking_1_e_talking_1_s",     // Talking_1 loop
+
+    // Talking_2 animations (backend may use these based on TALKING_VARIANTS config)
+    "idle_1_e_talking_2_s",        // Transition: idle -> talking_2
+    "talking_2_s_talking_2_e",     // Main talking_2 animation
+    "talking_2_e_idle_1_s",        // Transition: talking_2 -> idle
+    "talking_2_e_talking_2_s",     // Talking_2 loop
+
+    // Hi animations (optional)
     "idle_1_e_hi_1_s",             // Transition: idle -> hi
     "hi_1_s_hi_1_e",               // Hi animation
     "hi_1_e_idle_1_s"              // Transition: hi -> idle

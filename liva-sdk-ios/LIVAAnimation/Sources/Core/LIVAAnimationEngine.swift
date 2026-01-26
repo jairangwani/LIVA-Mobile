@@ -82,7 +82,7 @@ class LIVAAnimationEngine {
     private var mode: AnimationMode = .idle
 
     /// Current base animation name
-    private var currentOverlayBaseName: String = "idle_1_s"
+    private var currentOverlayBaseName: String = "idle_1_s_idle_1_e"
 
     /// Global frame index (used in idle mode)
     private var globalFrameIndex: Int = 0
@@ -125,8 +125,8 @@ class LIVAAnimationEngine {
     /// Active animation frame rate (FPS) - overlay/transition modes
     private let activeFrameRate: Double = 30.0
 
-    /// Default idle animation name
-    private let defaultIdleAnimation = "idle_1_s"
+    /// Default idle animation name (full name format: state_num_pos_state_num_pos)
+    private let defaultIdleAnimation = "idle_1_s_idle_1_e"
 
     /// Minimum frames needed before starting playback (adaptive buffering)
     private let minFramesBeforeStart = 10
@@ -272,6 +272,9 @@ class LIVAAnimationEngine {
 
     private var drawCallCount = 0
 
+    /// Enable detailed frame sync logging (set to true to debug frame matching)
+    var frameSyncDebugEnabled: Bool = true
+
     @objc private func draw(link: CADisplayLink) {
         let now = link.timestamp
         let elapsed = now - lastFrameTime
@@ -285,14 +288,21 @@ class LIVAAnimationEngine {
         lastFrameTime = now
         drawCallCount += 1
 
-        // Log every 100 frames to avoid spam
+        // Log every 100 frames to avoid spam (summary)
         if drawCallCount % 100 == 1 {
             animLog("[LIVAAnimationEngine] 🎨 Draw #\(drawCallCount): mode=\(mode), overlaySections=\(overlaySections.count), queue=\(overlayQueue.count)")
         }
 
         // 1. Determine base frame to draw
         let baseImage: UIImage?
+        var overlayDrivenFrame: OverlayDrivenFrame? = nil
+        var backendMatchedSprite: Int? = nil
+        var overlaySequenceIndex: Int? = nil
+        var overlayChar: String? = nil
+
         if let overlayDriven = getOverlayDrivenBaseFrame() {
+            overlayDrivenFrame = overlayDriven
+
             // ═══ OVERLAY MODE: Use overlay's exact base frame requirement ═══
             if overlayDriven.shouldStartPlaying {
                 overlayStates[overlayDriven.sectionIndex].playing = true
@@ -315,6 +325,18 @@ class LIVAAnimationEngine {
             baseImage = baseFrames[safe: overlayDriven.frameIndex]
             globalFrameIndex = overlayDriven.frameIndex
 
+            // Capture backend's intended frame for logging
+            if overlayDriven.sectionIndex < overlaySections.count {
+                let section = overlaySections[overlayDriven.sectionIndex]
+                let state = overlayStates[overlayDriven.sectionIndex]
+                if state.currentDrawingFrame < section.frames.count {
+                    let overlayFrame = section.frames[state.currentDrawingFrame]
+                    backendMatchedSprite = overlayFrame.matchedSpriteFrameNumber
+                    overlaySequenceIndex = state.currentDrawingFrame
+                    overlayChar = overlayFrame.char
+                }
+            }
+
         } else {
             // ═══ IDLE MODE: No overlay active, use independent counter ═══
             var baseFrames = animationFrames[currentOverlayBaseName] ?? []
@@ -329,6 +351,8 @@ class LIVAAnimationEngine {
 
         // 2. Collect overlay images to draw
         var overlaysToRender: [(image: UIImage, frame: CGRect)] = []
+        var overlayKey: String? = nil
+        var hasOverlayImage: Bool = false
 
         if mode == .overlay {
             for (index, section) in overlaySections.enumerated() {
@@ -342,11 +366,14 @@ class LIVAAnimationEngine {
                     sectionIndex: section.sectionIndex,
                     sequenceIndex: state.currentDrawingFrame
                 )
+                overlayKey = key
 
                 if let overlayImage = imageCache.getImage(forKey: key) {
                     overlaysToRender.append((overlayImage, overlayFrame.coordinates))
+                    hasOverlayImage = true
                 } else {
                     // Missing overlay frame - log warning
+                    hasOverlayImage = false
                     if state.currentDrawingFrame % 10 == 0 {
                         animLog("[LIVAAnimationEngine] ⚠️ Missing overlay frame: \(key)")
                     }
@@ -354,9 +381,25 @@ class LIVAAnimationEngine {
             }
         }
 
+        // ═══ FRAME SYNC DEBUG LOGGING ═══
+        // Log every frame in overlay mode for debugging (like web frontend's LOG_FRAME_SYNC_DEBUG)
+        if frameSyncDebugEnabled && mode == .overlay {
+            if let overlayDriven = overlayDrivenFrame {
+                let baseFrameCount = animationFrames[currentOverlayBaseName]?.count ?? 0
+                let syncStatus = (backendMatchedSprite != nil && backendMatchedSprite! % max(baseFrameCount, 1) == overlayDriven.frameIndex) ? "✅SYNC" : "❌DESYNC"
+
+                animLog("[FRAME_SYNC] draw=\(drawCallCount) chunk=\(overlayDriven.chunkIndex) seq=\(overlaySequenceIndex ?? -1) " +
+                       "base=\(overlayDriven.frameIndex)/\(baseFrameCount) backend_matched=\(backendMatchedSprite ?? -1) " +
+                       "anim=\(currentOverlayBaseName) char=\(overlayChar ?? "-") " +
+                       "overlay_key=\(overlayKey ?? "nil") hasImage=\(hasOverlayImage) \(syncStatus)")
+            }
+        }
+
         // 3. Render frame to canvas
         if let baseImage = baseImage {
             canvasView?.renderFrame(base: baseImage, overlays: overlaysToRender)
+        } else {
+            animLog("[LIVAAnimationEngine] ⚠️ No base image for frame \(globalFrameIndex) in \(currentOverlayBaseName)")
         }
 
         // 4. Advance frame counters
