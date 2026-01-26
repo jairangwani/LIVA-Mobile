@@ -131,6 +131,7 @@ flutter run
 - [SOCKET_PROTOCOL.md](SOCKET_PROTOCOL.md) - Socket.IO event specification
 - [docs/API_REFERENCE.md](docs/API_REFERENCE.md) - SDK public API documentation
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) - How to publish SDKs
+- [IOS_TESTING_GUIDE.md](IOS_TESTING_GUIDE.md) - How to test iOS SDK with Maestro and debug logs
 
 ## Backend Compatibility
 

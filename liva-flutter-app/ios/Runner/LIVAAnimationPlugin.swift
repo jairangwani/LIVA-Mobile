@@ -57,6 +57,8 @@ public class LIVAAnimationPlugin: NSObject, FlutterPlugin {
             result(getDebugInfo())
         case "setDebugMode":
             handleSetDebugMode(call.arguments, result: result)
+        case "getDebugLogs":
+            result(LIVAClient.shared.getDebugLogs())
         default:
             result(FlutterMethodNotImplemented)
         }

@@ -7,6 +7,70 @@
 //
 
 import UIKit
+import os.log
+
+// Debug logger for animation engine
+private let animLogger = OSLog(subsystem: "com.liva.animation", category: "AnimationEngine")
+
+/// Log to both os_log and file for debugging
+func animLog(_ message: String, type: OSLogType = .debug) {
+    os_log("%{public}@", log: animLogger, type: type, message)
+    LIVADebugLog.shared.log(message)
+}
+
+/// Shared debug log that writes to file
+class LIVADebugLog {
+    static let shared = LIVADebugLog()
+    private var logs: [String] = []
+    private let maxLogs = 500
+    private let logFileURL: URL?
+
+    init() {
+        // Create log file in documents directory
+        if let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            logFileURL = documentsPath.appendingPathComponent("liva_debug.log")
+            // Clear old log file
+            try? FileManager.default.removeItem(at: logFileURL!)
+        } else {
+            logFileURL = nil
+        }
+    }
+
+    func log(_ message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let entry = "[\(timestamp)] \(message)"
+        logs.append(entry)
+        if logs.count > maxLogs {
+            logs.removeFirst()
+        }
+        // Also print to console using NSLog for visibility
+        NSLog("%@", message)
+
+        // Write to file
+        if let url = logFileURL {
+            let line = entry + "\n"
+            if let data = line.data(using: .utf8) {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    if let fileHandle = try? FileHandle(forWritingTo: url) {
+                        fileHandle.seekToEndOfFile()
+                        fileHandle.write(data)
+                        fileHandle.closeFile()
+                    }
+                } else {
+                    try? data.write(to: url)
+                }
+            }
+        }
+    }
+
+    func getLogs() -> [String] {
+        return logs
+    }
+
+    func getLogsString() -> String {
+        return logs.joined(separator: "\n")
+    }
+}
 
 /// Core animation rendering engine
 /// Handles base animations + overlay frames (lip sync) with synchronized playback
@@ -74,7 +138,7 @@ class LIVAAnimationEngine {
 
     init(canvasView: LIVACanvasView) {
         self.canvasView = canvasView
-        print("[LIVAAnimationEngine] Initialized")
+        animLog("[LIVAAnimationEngine] Initialized")
     }
 
     deinit {
@@ -86,7 +150,7 @@ class LIVAAnimationEngine {
     /// Start the rendering loop
     func startRendering() {
         guard displayLink == nil else {
-            print("[LIVAAnimationEngine] Already rendering")
+            animLog("[LIVAAnimationEngine] Already rendering")
             return
         }
 
@@ -94,7 +158,7 @@ class LIVAAnimationEngine {
         displayLink?.add(to: .main, forMode: .common)
         lastFrameTime = CACurrentMediaTime()
 
-        print("[LIVAAnimationEngine] ▶️ Started rendering")
+        animLog("[LIVAAnimationEngine] ▶️ Started rendering")
     }
 
     /// Stop the rendering loop
@@ -102,7 +166,7 @@ class LIVAAnimationEngine {
         displayLink?.invalidate()
         displayLink = nil
 
-        print("[LIVAAnimationEngine] ⏹️ Stopped rendering")
+        animLog("[LIVAAnimationEngine] ⏹️ Stopped rendering")
     }
 
     /// Load base animation frames
@@ -117,7 +181,7 @@ class LIVAAnimationEngine {
             expectedFrameCounts[name] = count
         }
 
-        print("[LIVAAnimationEngine] Loaded base animation: \(name), frames: \(frames.count), expected: \(expectedCount ?? frames.count)")
+        animLog("[LIVAAnimationEngine] Loaded base animation: \(name), frames: \(frames.count), expected: \(expectedCount ?? frames.count)")
     }
 
     /// Enqueue overlay set for playback
@@ -144,7 +208,7 @@ class LIVAAnimationEngine {
 
         overlayQueue.append(queued)
 
-        print("[LIVAAnimationEngine] 📦 Enqueued overlay chunk \(chunkIndex), frames: \(frames.count), queue length: \(overlayQueue.count)")
+        animLog("[LIVAAnimationEngine] 📦 Enqueued overlay chunk \(chunkIndex), frames: \(frames.count), queue length: \(overlayQueue.count)")
 
         // Start playback if not already playing
         if !isSetPlaying {
@@ -161,6 +225,13 @@ class LIVAAnimationEngine {
         imageCache.setImage(image, forKey: key, chunkIndex: chunkIndex)
     }
 
+    /// Get overlay image from cache
+    /// - Parameter key: Cache key
+    /// - Returns: Cached image if available
+    func getOverlayImage(forKey key: String) -> UIImage? {
+        return imageCache.getImage(forKey: key)
+    }
+
     /// Reset to idle state
     func reset() {
         mode = .idle
@@ -172,10 +243,12 @@ class LIVAAnimationEngine {
         isSetPlaying = false
         imageCache.clearAll()
 
-        print("[LIVAAnimationEngine] 🔄 Reset to idle")
+        animLog("[LIVAAnimationEngine] 🔄 Reset to idle")
     }
 
     // MARK: - Rendering Loop
+
+    private var drawCallCount = 0
 
     @objc private func draw(link: CADisplayLink) {
         let now = link.timestamp
@@ -188,6 +261,12 @@ class LIVAAnimationEngine {
         guard elapsed >= frameDuration else { return }
 
         lastFrameTime = now
+        drawCallCount += 1
+
+        // Log every 100 frames to avoid spam
+        if drawCallCount % 100 == 1 {
+            animLog("[LIVAAnimationEngine] 🎨 Draw #\(drawCallCount): mode=\(mode), overlaySections=\(overlaySections.count), queue=\(overlayQueue.count)")
+        }
 
         // 1. Determine base frame to draw
         let baseImage: UIImage?
@@ -200,13 +279,13 @@ class LIVAAnimationEngine {
                 overlayStates[overlayDriven.sectionIndex].startTime = now
                 mode = .overlay
 
-                print("[LIVAAnimationEngine] 🎬 Starting overlay chunk \(overlayDriven.chunkIndex)")
+                animLog("[LIVAAnimationEngine] 🎬 Starting overlay chunk \(overlayDriven.chunkIndex)")
             }
 
             // Switch base animation if needed
             if overlayDriven.animationName != currentOverlayBaseName {
                 currentOverlayBaseName = overlayDriven.animationName
-                print("[LIVAAnimationEngine] 🔄 Switched base animation to: \(currentOverlayBaseName)")
+                animLog("[LIVAAnimationEngine] 🔄 Switched base animation to: \(currentOverlayBaseName)")
             }
 
             // Get base frames for current animation
@@ -247,7 +326,7 @@ class LIVAAnimationEngine {
                 } else {
                     // Missing overlay frame - log warning
                     if state.currentDrawingFrame % 10 == 0 {
-                        print("[LIVAAnimationEngine] ⚠️ Missing overlay frame: \(key)")
+                        animLog("[LIVAAnimationEngine] ⚠️ Missing overlay frame: \(key)")
                     }
                 }
             }
@@ -273,6 +352,10 @@ class LIVAAnimationEngine {
     /// This is the SINGLE SOURCE OF TRUTH for base frame selection in overlay mode
     private func getOverlayDrivenBaseFrame() -> OverlayDrivenFrame? {
         // Find first playing or ready-to-start overlay section
+        if drawCallCount % 100 == 1 && !overlaySections.isEmpty {
+            animLog("[LIVAAnimationEngine] 🔍 getOverlayDrivenBaseFrame: checking \(overlaySections.count) sections")
+        }
+
         for (index, section) in overlaySections.enumerated() {
             let state = overlayStates[index]
 
@@ -320,7 +403,11 @@ class LIVAAnimationEngine {
             sequenceIndex: 0
         )
 
-        return imageCache.hasImage(forKey: key)
+        let hasImage = imageCache.hasImage(forKey: key)
+        if !hasImage && drawCallCount % 100 == 1 {
+            animLog("[LIVAAnimationEngine] ❌ First frame not ready, key: \(key), cache count: \(imageCache.count)")
+        }
+        return hasImage
     }
 
     /// Get base frame count for animation
@@ -354,7 +441,7 @@ class LIVAAnimationEngine {
                 state.playing = false
                 state.done = true
 
-                print("[LIVAAnimationEngine] ✅ Overlay chunk \(section.chunkIndex) finished")
+                animLog("[LIVAAnimationEngine] ✅ Overlay chunk \(section.chunkIndex) finished")
             }
 
             overlayStates[index] = state
@@ -399,12 +486,12 @@ class LIVAAnimationEngine {
 
                 // Start next chunk in queue (if any)
                 if !overlayQueue.isEmpty {
-                    print("[LIVAAnimationEngine] ▶️ Starting next chunk from queue")
+                    animLog("[LIVAAnimationEngine] ▶️ Starting next chunk from queue")
                     startNextOverlaySetIfAny()
                 } else {
                     // All chunks done, return to idle
                     mode = .idle
-                    print("[LIVAAnimationEngine] 💤 Returned to idle mode")
+                    animLog("[LIVAAnimationEngine] 💤 Returned to idle mode")
                 }
             }
         }
@@ -422,7 +509,7 @@ class LIVAAnimationEngine {
 
             if waitedMs < maxBufferWaitMs {
                 // Buffer not ready, re-queue and retry
-                print("[LIVAAnimationEngine] ⏳ Buffer not ready, waited \(waitedMs)ms, re-queueing")
+                animLog("[LIVAAnimationEngine] ⏳ Buffer not ready, waited \(waitedMs)ms, re-queueing")
                 overlayQueue.insert(queued, at: 0)
 
                 // Retry after 100ms
@@ -432,7 +519,7 @@ class LIVAAnimationEngine {
                 return
             } else {
                 // Timeout exceeded, start anyway
-                print("[LIVAAnimationEngine] ⚠️ Buffer timeout (\(waitedMs)ms), starting anyway")
+                animLog("[LIVAAnimationEngine] ⚠️ Buffer timeout (\(waitedMs)ms), starting anyway")
             }
         }
 
@@ -449,7 +536,7 @@ class LIVAAnimationEngine {
         overlayStates = [state]
         isSetPlaying = true
 
-        print("[LIVAAnimationEngine] 🚀 Processed overlay set, chunk: \(queued.section.chunkIndex)")
+        animLog("[LIVAAnimationEngine] 🚀 Processed overlay set, chunk: \(queued.section.chunkIndex)")
     }
 
     /// Check if enough frames are ready to start playback (adaptive buffering)

@@ -106,6 +106,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           },
         ),
         IconButton(
+          icon: const Icon(Icons.article_outlined),
+          tooltip: 'View SDK Logs',
+          onPressed: _showDebugLogs,
+        ),
+        IconButton(
           icon: const Icon(Icons.people_outline),
           onPressed: () => context.push('/agents'),
         ),
@@ -373,5 +378,65 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _reconnect() async {
     await LIVAAnimation.disconnect();
     await _initializeAnimation();
+  }
+
+  Future<void> _showDebugLogs() async {
+    final logs = await LIVAAnimation.getDebugLogs();
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.3,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => Container(
+          color: Colors.black87,
+          child: Column(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'SDK Debug Logs',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.refresh, color: Colors.white),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        _showDebugLogs();
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: SingleChildScrollView(
+                  controller: scrollController,
+                  padding: const EdgeInsets.all(16),
+                  child: SelectableText(
+                    logs.isEmpty ? 'No logs yet' : logs,
+                    style: const TextStyle(
+                      color: Colors.greenAccent,
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

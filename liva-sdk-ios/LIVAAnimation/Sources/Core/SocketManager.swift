@@ -8,6 +8,12 @@
 import Foundation
 import SocketIO
 
+/// Log to shared debug log for socket events
+private func socketLog(_ message: String) {
+    LIVADebugLog.shared.log(message)
+    print(message)
+}
+
 /// Manages Socket.IO connection to AnnaOS-API backend
 final class LIVASocketManager {
 
@@ -87,6 +93,10 @@ final class LIVASocketManager {
     var onAnimationChunkMetadata: (([String: Any]) -> Void)?
     var onFrameImageReceived: (([String: Any]) -> Void)?
 
+    // NEW - Base animations manifest callback
+    // Manifest contains: { "animations": { "name": {"frames": N, "version": "xxx"}, ... } }
+    var onAnimationsManifest: (([String: Any]) -> Void)?
+
     // MARK: - Initialization
 
     init(configuration: LIVAConfiguration) {
@@ -129,8 +139,8 @@ final class LIVASocketManager {
         socket = manager?.defaultSocket
         setupEventHandlers()
 
-        print("[LIVASocketManager] Connecting to: \(url.absoluteString)")
-        print("[LIVASocketManager] Connection params: \(connectionParams)")
+        socketLog("[LIVASocketManager] Connecting to: \(url.absoluteString)")
+        socketLog("[LIVASocketManager] Connection params: \(connectionParams)")
 
         socket?.connect()
     }
@@ -156,7 +166,7 @@ final class LIVASocketManager {
 
         // Connection events
         socket.on(clientEvent: .connect) { [weak self] _, _ in
-            print("[LIVASocketManager] ✅ Connected successfully!")
+            socketLog("[LIVASocketManager] ✅ Connected successfully!")
             self?.reconnectAttempts = 0
             self?.onConnect?()
         }
@@ -164,7 +174,7 @@ final class LIVASocketManager {
         socket.on(clientEvent: .disconnect) { [weak self] data, _ in
             guard let self = self else { return }
             let reason = (data.first as? String) ?? "unknown"
-            print("[LIVASocketManager] ❌ Disconnected. Reason: \(reason)")
+            socketLog("[LIVASocketManager] ❌ Disconnected. Reason: \(reason)")
             self.onDisconnect?(reason)
 
             if !self.isManualDisconnect {
@@ -174,35 +184,45 @@ final class LIVASocketManager {
 
         socket.on(clientEvent: .error) { [weak self] data, _ in
             let errorMessage = (data.first as? String) ?? "Unknown socket error"
-            print("[LIVASocketManager] ❌ Socket error: \(errorMessage)")
-            print("[LIVASocketManager] Error data: \(data)")
+            socketLog("[LIVASocketManager] ❌ Socket error: \(errorMessage)")
+            socketLog("[LIVASocketManager] Error data: \(data)")
             self?.onError?(LIVAError.connectionFailed(errorMessage))
         }
 
         socket.on(clientEvent: .statusChange) { [weak self] data, _ in
-            print("[LIVASocketManager] Status change: \(data)")
+            socketLog("[LIVASocketManager] Status change: \(data)")
         }
 
         socket.on(clientEvent: .reconnect) { [weak self] data, _ in
-            print("[LIVASocketManager] Reconnecting...")
+            socketLog("[LIVASocketManager] Reconnecting...")
         }
 
         socket.on(clientEvent: .reconnectAttempt) { [weak self] data, _ in
-            print("[LIVASocketManager] Reconnect attempt...")
+            socketLog("[LIVASocketManager] Reconnect attempt...")
         }
 
         // Audio event
         socket.on("receive_audio") { [weak self] data, _ in
+            socketLog("[LIVASocketManager] 📨 RECEIVED: receive_audio event")
             self?.handleAudioEvent(data)
         }
 
         // Frame batch event
         socket.on("receive_frame_images_batch") { [weak self] data, _ in
+            if let dict = data.first as? [String: Any] {
+                let chunkIndex = dict["chunk_index"] as? Int ?? -1
+                let batchIndex = dict["batch_index"] as? Int ?? -1
+                socketLog("[LIVASocketManager] 📨 RECEIVED: receive_frame_images_batch chunk=\(chunkIndex) batch=\(batchIndex)")
+            }
             self?.handleFrameBatchEvent(data)
         }
 
         // Chunk ready event
         socket.on("chunk_images_ready") { [weak self] data, _ in
+            if let dict = data.first as? [String: Any] {
+                let chunkIndex = dict["chunk_index"] as? Int ?? -1
+                socketLog("[LIVASocketManager] 📨 RECEIVED: chunk_images_ready chunk=\(chunkIndex)")
+            }
             self?.handleChunkReadyEvent(data)
         }
 
@@ -241,6 +261,40 @@ final class LIVASocketManager {
         socket.on("receive_frame_image") { [weak self] data, _ in
             self?.handleFrameImageEvent(data)
         }
+
+        // NEW - Base animations manifest (tells us what animations are available)
+        socket.on("base_animations_manifest") { [weak self] data, _ in
+            self?.handleAnimationsManifestEvent(data)
+        }
+    }
+
+    // MARK: - Request Methods
+
+    /// Request animations manifest from backend
+    func requestAnimationsManifest(agentId: String) {
+        guard let socket = socket, socket.status == .connected else {
+            socketLog("[LIVASocketManager] Cannot request manifest - not connected")
+            return
+        }
+
+        socketLog("[LIVASocketManager] 📤 Requesting animations manifest for agent: \(agentId)")
+        socket.emit("request_base_animations_manifest", [
+            "agentId": agentId  // Backend expects camelCase
+        ])
+    }
+
+    /// Request base animation from backend
+    func requestBaseAnimation(name: String, agentId: String) {
+        guard let socket = socket, socket.status == .connected else {
+            socketLog("[LIVASocketManager] Cannot request animation - not connected")
+            return
+        }
+
+        socketLog("[LIVASocketManager] 📤 Requesting animation: \(name) for agent: \(agentId)")
+        socket.emit("request_specific_base_animation", [
+            "animationType": name,  // Backend expects animationType
+            "agentId": agentId      // Backend expects camelCase
+        ])
     }
 
     // MARK: - Event Parsing
@@ -302,9 +356,36 @@ final class LIVASocketManager {
 
         var frames: [FrameData] = []
         if let framesArray = dict["frames"] as? [[String: Any]] {
-            for frameDict in framesArray {
+            for (idx, frameDict) in framesArray.enumerated() {
+                // Debug: Log the frame dict keys and image_data type
+                if idx == 0 {
+                    socketLog("[LIVASocketManager] 🔍 Frame keys: \(Array(frameDict.keys).prefix(10))")
+                    if let imageData = frameDict["image_data"] {
+                        socketLog("[LIVASocketManager] 🔍 image_data type: \(type(of: imageData))")
+                        if let stringData = imageData as? String {
+                            socketLog("[LIVASocketManager] 🔍 image_data as String, length: \(stringData.count)")
+                        } else if let dataData = imageData as? Data {
+                            socketLog("[LIVASocketManager] 🔍 image_data as Data, size: \(dataData.count)")
+                        } else if let dictData = imageData as? [String: Any] {
+                            socketLog("[LIVASocketManager] 🔍 image_data as Dict, keys: \(Array(dictData.keys))")
+                        }
+                    } else {
+                        socketLog("[LIVASocketManager] 🔍 image_data is nil")
+                    }
+                }
+
+                // Handle image_data - can be either Data (binary) or String (base64)
+                var imageDataString = ""
+                if let binaryData = frameDict["image_data"] as? Data {
+                    // Backend sends binary data directly - convert to base64 for storage
+                    imageDataString = binaryData.base64EncodedString()
+                } else if let stringData = frameDict["image_data"] as? String {
+                    // Already base64 string
+                    imageDataString = stringData
+                }
+
                 let frame = FrameData(
-                    imageData: frameDict["image_data"] as? String ?? "",
+                    imageData: imageDataString,
                     imageMime: frameDict["image_mime"] as? String ?? "image/webp",
                     spriteIndexFolder: frameDict["sprite_index_folder"] as? Int ?? 0,
                     sheetFilename: frameDict["sheet_filename"] as? String ?? "",
@@ -329,7 +410,12 @@ final class LIVASocketManager {
             emissionTimestamp: emissionTimestamp
         )
 
-        onFrameBatchReceived?(batch)
+        socketLog("[LIVASocketManager] 📦 Parsed batch \(batchIndex) with \(frames.count) frames, calling callback...")
+        if onFrameBatchReceived != nil {
+            onFrameBatchReceived?(batch)
+        } else {
+            socketLog("[LIVASocketManager] ⚠️ onFrameBatchReceived callback is nil!")
+        }
     }
 
     private func handleChunkReadyEvent(_ data: [Any]) {
@@ -352,19 +438,23 @@ final class LIVASocketManager {
 
     private func handleAnimationTotalFramesEvent(_ data: [Any]) {
         guard let dict = data.first as? [String: Any],
-              let animationName = dict["animation_name"] as? String,
+              let animationType = dict["animation_type"] as? String,
               let totalFrames = dict["total_frames"] as? Int else {
+            socketLog("[LIVASocketManager] ⚠️ Invalid animation_total_frames format")
             return
         }
 
-        onAnimationTotalFrames?(animationName, totalFrames)
+        socketLog("[LIVASocketManager] 📊 Animation \(animationType) has \(totalFrames) frames")
+        onAnimationTotalFrames?(animationType, totalFrames)
     }
 
     private func handleBaseFrameEvent(_ data: [Any]) {
         guard let dict = data.first as? [String: Any],
-              let animationName = dict["animation_name"] as? String,
+              let animationType = dict["animation_type"] as? String,
               let frameIndex = dict["frame_index"] as? Int,
-              let imageData = dict["image_data"] as? String else {
+              let frameData = dict["frame_data"] as? [String: Any],
+              let imageData = frameData["data"] as? String else {
+            socketLog("[LIVASocketManager] ⚠️ Invalid receive_base_frame format")
             return
         }
 
@@ -376,29 +466,42 @@ final class LIVASocketManager {
         }
 
         guard let data = Data(base64Encoded: base64String) else {
+            socketLog("[LIVASocketManager] ⚠️ Failed to decode base64 image data")
             return
         }
 
-        onBaseFrameReceived?(animationName, frameIndex, data)
+        // Log first frame of each animation
+        if frameIndex == 0 {
+            socketLog("[LIVASocketManager] 📷 Received first frame of \(animationType)")
+        }
+
+        onBaseFrameReceived?(animationType, frameIndex, data)
     }
 
     private func handleAnimationFramesCompleteEvent(_ data: [Any]) {
-        guard let dict = data.first as? [String: Any],
-              let animationName = dict["animation_name"] as? String else {
+        guard let dict = data.first as? [String: Any] else {
+            socketLog("[LIVASocketManager] ⚠️ Invalid animation_frames_complete format")
             return
         }
 
+        // Backend sends "animation_type", not "animation_name"
+        guard let animationName = dict["animation_type"] as? String else {
+            socketLog("[LIVASocketManager] ⚠️ Missing animation_type in animation_frames_complete")
+            return
+        }
+
+        socketLog("[LIVASocketManager] ✅ Animation frames complete: \(animationName)")
         onAnimationFramesComplete?(animationName)
     }
 
     // NEW - Animation chunk metadata event handler
     private func handleAnimationChunkMetadataEvent(_ data: [Any]) {
         guard let dict = data.first as? [String: Any] else {
-            print("[LIVASocketManager] ⚠️ Invalid animation_chunk_metadata format")
+            socketLog("[LIVASocketManager] ⚠️ Invalid animation_chunk_metadata format")
             return
         }
 
-        print("[LIVASocketManager] 📦 Received animation_chunk_metadata: chunk \(dict["chunk_index"] ?? "?")")
+        socketLog("[LIVASocketManager] 📦 Received animation_chunk_metadata: chunk \(dict["chunk_index"] ?? "?")")
 
         // Forward raw dictionary to callback - LIVAAnimationEngine will parse it
         onAnimationChunkMetadata?(dict)
@@ -407,12 +510,30 @@ final class LIVASocketManager {
     // NEW - Frame image event handler
     private func handleFrameImageEvent(_ data: [Any]) {
         guard let dict = data.first as? [String: Any] else {
-            print("[LIVASocketManager] ⚠️ Invalid receive_frame_image format")
+            socketLog("[LIVASocketManager] ⚠️ Invalid receive_frame_image format")
             return
         }
 
         // Forward raw dictionary to callback - LIVAAnimationEngine will parse it
         onFrameImageReceived?(dict)
+    }
+
+    // NEW - Base animations manifest event handler
+    private func handleAnimationsManifestEvent(_ data: [Any]) {
+        guard let dict = data.first as? [String: Any] else {
+            socketLog("[LIVASocketManager] ⚠️ Invalid base_animations_manifest format")
+            return
+        }
+
+        socketLog("[LIVASocketManager] 📋 Received animations manifest")
+
+        // Extract animations dictionary (keys = animation names)
+        if let animations = dict["animations"] as? [String: Any] {
+            socketLog("[LIVASocketManager] 📋 Found \(animations.count) animations in manifest: \(Array(animations.keys).prefix(3))...")
+            onAnimationsManifest?(animations)
+        } else {
+            socketLog("[LIVASocketManager] ⚠️ No animations dictionary in manifest")
+        }
     }
 
     // MARK: - Reconnection

@@ -25,10 +25,10 @@ class LIVAImageCache {
     // MARK: - Constants
 
     /// Maximum number of images to cache
-    private let maxImageCount = 500
+    private let maxImageCount = 2000
 
-    /// Maximum memory size (50 MB)
-    private let maxMemorySize = 50 * 1024 * 1024
+    /// Maximum memory size (200 MB) - overlays need more space
+    private let maxMemorySize = 200 * 1024 * 1024
 
     // MARK: - Initialization
 
@@ -73,9 +73,11 @@ class LIVAImageCache {
 
         cache.setObject(image, forKey: key as NSString, cost: cost)
 
-        #if DEBUG
-        print("[LIVAImageCache] Cached image: \(key), cost: \(cost) bytes, chunk: \(chunkIndex)")
-        #endif
+        // Log first few cached images to debug key format
+        let totalImages = chunkImageKeys.values.reduce(0) { $0 + $1.count }
+        if totalImages <= 5 {
+            print("[LIVAImageCache] Cached image: \(key), chunk: \(chunkIndex), total: \(totalImages)")
+        }
     }
 
     /// Get image from cache
@@ -144,6 +146,20 @@ class LIVAImageCache {
             "countLimit": cache.countLimit,
             "totalCostLimit": cache.totalCostLimit
         ]
+    }
+
+    /// Get total number of cached images
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return chunkImageKeys.values.reduce(0) { $0 + $1.count }
+    }
+
+    /// Get all cached keys for a chunk
+    func keysForChunk(_ chunkIndex: Int) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(chunkImageKeys[chunkIndex] ?? [])
     }
 
     // MARK: - Private Methods

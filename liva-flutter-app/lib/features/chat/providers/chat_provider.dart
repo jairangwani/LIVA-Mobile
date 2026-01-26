@@ -81,6 +81,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
       }
 
       // Send to backend via HTTP POST (use constant URL, not cached)
+      // Backend expects: AgentID (capital), message (not text)
       final response = await http.post(
         Uri.parse('${AppConfigConstants.backendUrl}/messages'),
         headers: {
@@ -88,14 +89,15 @@ class ChatNotifier extends StateNotifier<ChatState> {
           'X-User-ID': config.userId, // Required by backend middleware
         },
         body: jsonEncode({
-          'user_id': config.userId,
-          'agent_id': config.agentId,
+          'AgentID': config.agentId,
+          'message': content,
           'instance_id': config.instanceId,
-          'text': content,
+          'userResolution': config.resolution,
         }),
       );
 
-      if (response.statusCode != 200) {
+      // 200 = OK, 201 = Created - both are success
+      if (response.statusCode != 200 && response.statusCode != 201) {
         throw Exception('Failed to send message: ${response.statusCode}');
       }
 

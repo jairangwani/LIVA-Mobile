@@ -209,6 +209,17 @@ class LIVAAnimation {
     }
   }
 
+  /// Get debug logs from native SDK.
+  /// Returns all logged messages from the animation engine.
+  static Future<String> getDebugLogs() async {
+    try {
+      final result = await _channel.invokeMethod('getDebugLogs');
+      return result as String? ?? '';
+    } on PlatformException {
+      return '';
+    }
+  }
+
   // MARK: - Debug Controls
 
   /// Enable or disable debug overlay on the canvas.
