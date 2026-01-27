@@ -242,12 +242,12 @@ public final class LIVAClient {
         pendingOverlayPositions.removeAll()
 
         // THREAD SAFETY: Clear shared state under lock
-        batchTrackingLock.lock()
-        pendingOverlayFrames.removeAll()
-        chunkAnimationNames.removeAll()
-        pendingBatchCount.removeAll()
-        deferredChunkReady.removeAll()
-        batchTrackingLock.unlock()
+        batchTrackingLock.withLock {
+            pendingOverlayFrames.removeAll()
+            chunkAnimationNames.removeAll()
+            pendingBatchCount.removeAll()
+            deferredChunkReady.removeAll()
+        }
 
         // Clear pending base animation (like web's pendingBaseAtEndRef.current = null)
         pendingBaseAtEnd = nil
@@ -426,17 +426,17 @@ public final class LIVAClient {
         let frames = frameBatch.frames
 
         // PHASE 1 & 5: Increment pending batch count IMMEDIATELY (before async)
-        batchTrackingLock.lock()
-        pendingBatchCount[chunkIndex, default: 0] += 1
-        batchTrackingLock.unlock()
+        batchTrackingLock.withLock {
+            pendingBatchCount[chunkIndex, default: 0] += 1
+        }
 
         // Initialize tracking arrays for this chunk if needed (thread-safe)
-        batchTrackingLock.lock()
-        if pendingOverlayFrames[chunkIndex] == nil {
-            pendingOverlayFrames[chunkIndex] = []
-            pendingOverlayFrames[chunkIndex]?.reserveCapacity(120)
+        batchTrackingLock.withLock {
+            if pendingOverlayFrames[chunkIndex] == nil {
+                pendingOverlayFrames[chunkIndex] = []
+                pendingOverlayFrames[chunkIndex]?.reserveCapacity(120)
+            }
         }
-        batchTrackingLock.unlock()
 
         // Cache engine reference
         let engine = newAnimationEngine
@@ -562,24 +562,25 @@ public final class LIVAClient {
         )
 
         // THREAD SAFETY: Lock when accessing shared state
-        batchTrackingLock.lock()
-        pendingOverlayFrames[chunkIndex]?.append(overlayFrame)
-        if !frame.animationName.isEmpty && chunkAnimationNames[chunkIndex] == nil {
-            chunkAnimationNames[chunkIndex] = frame.animationName
+        batchTrackingLock.withLock {
+            pendingOverlayFrames[chunkIndex]?.append(overlayFrame)
+            if !frame.animationName.isEmpty && chunkAnimationNames[chunkIndex] == nil {
+                chunkAnimationNames[chunkIndex] = frame.animationName
+            }
         }
-        batchTrackingLock.unlock()
     }
 
     /// PHASE 5: Called when a batch finishes processing
     /// Decrements pending count and processes deferred chunk_ready if all batches done
     /// NOTE: Called from main thread via DispatchQueue.main.async
     private func onBatchComplete(chunkIndex: Int) {
-        batchTrackingLock.lock()
-        pendingBatchCount[chunkIndex, default: 1] -= 1
-        let remaining = pendingBatchCount[chunkIndex] ?? 0
-        let deferredTotal = remaining == 0 ? deferredChunkReady.removeValue(forKey: chunkIndex) : nil
-        let framesExist = pendingOverlayFrames[chunkIndex] != nil && !(pendingOverlayFrames[chunkIndex]?.isEmpty ?? true)
-        batchTrackingLock.unlock()
+        let (deferredTotal, framesExist) = batchTrackingLock.withLock { () -> (Int?, Bool) in
+            pendingBatchCount[chunkIndex, default: 1] -= 1
+            let remaining = pendingBatchCount[chunkIndex] ?? 0
+            let deferredTotal = remaining == 0 ? deferredChunkReady.removeValue(forKey: chunkIndex) : nil
+            let framesExist = pendingOverlayFrames[chunkIndex] != nil && !(pendingOverlayFrames[chunkIndex]?.isEmpty ?? true)
+            return (deferredTotal, framesExist)
+        }
 
         // If all batches done and chunk_ready was deferred, process it now
         if let totalSent = deferredTotal {
@@ -594,26 +595,31 @@ public final class LIVAClient {
 
     private func handleChunkReady(chunkIndex: Int, totalSent: Int) {
         // PHASE 5: Check if batches are still processing + frames exist (single lock)
-        batchTrackingLock.lock()
-        let pendingCount = pendingBatchCount[chunkIndex, default: 0]
-        let framesExist = pendingOverlayFrames[chunkIndex] != nil && !(pendingOverlayFrames[chunkIndex]?.isEmpty ?? true)
+        let shouldDefer = batchTrackingLock.withLock { () -> (shouldDefer: Bool, reason: String?) in
+            let pendingCount = pendingBatchCount[chunkIndex, default: 0]
+            let framesExist = pendingOverlayFrames[chunkIndex] != nil && !(pendingOverlayFrames[chunkIndex]?.isEmpty ?? true)
 
-        if pendingCount > 0 {
-            // Batches still processing - defer chunk_ready
-            deferredChunkReady[chunkIndex] = totalSent
-            batchTrackingLock.unlock()
-            clientLog("[LIVAClient] ⏳ Deferring chunk_ready for chunk \(chunkIndex) - \(pendingCount) batches still processing")
-            return
+            if pendingCount > 0 {
+                // Batches still processing - defer chunk_ready
+                deferredChunkReady[chunkIndex] = totalSent
+                return (true, "⏳ Deferring chunk_ready for chunk \(chunkIndex) - \(pendingCount) batches still processing")
+            }
+
+            if !framesExist {
+                // No frames yet - defer chunk_ready
+                deferredChunkReady[chunkIndex] = totalSent
+                return (true, "⏳ Deferring chunk_ready for chunk \(chunkIndex) - NO FRAMES YET (race condition)")
+            }
+
+            return (false, nil)
         }
 
-        if !framesExist {
-            // No frames yet - defer chunk_ready
-            deferredChunkReady[chunkIndex] = totalSent
-            batchTrackingLock.unlock()
-            clientLog("[LIVAClient] ⏳ Deferring chunk_ready for chunk \(chunkIndex) - NO FRAMES YET (race condition)")
+        if shouldDefer.shouldDefer {
+            if let reason = shouldDefer.reason {
+                clientLog("[LIVAClient] \(reason)")
+            }
             return
         }
-        batchTrackingLock.unlock()
 
         // All batches done AND frames exist - process chunk_ready
         processChunkReady(chunkIndex: chunkIndex, totalSent: totalSent)
@@ -631,13 +637,14 @@ public final class LIVAClient {
         )
 
         // THREAD SAFETY: Copy data under lock, then release lock before processing
-        batchTrackingLock.lock()
-        let overlayFramesCopy = pendingOverlayFrames[chunkIndex]
-        let animationNameFromDict = chunkAnimationNames[chunkIndex]
-        // Clean up stored frames immediately (under lock)
-        pendingOverlayFrames.removeValue(forKey: chunkIndex)
-        chunkAnimationNames.removeValue(forKey: chunkIndex)
-        batchTrackingLock.unlock()
+        let (overlayFramesCopy, animationNameFromDict) = batchTrackingLock.withLock { () -> ([OverlayFrame]?, String?) in
+            let overlayFramesCopy = pendingOverlayFrames[chunkIndex]
+            let animationNameFromDict = chunkAnimationNames[chunkIndex]
+            // Clean up stored frames immediately (under lock)
+            pendingOverlayFrames.removeValue(forKey: chunkIndex)
+            chunkAnimationNames.removeValue(forKey: chunkIndex)
+            return (overlayFramesCopy, animationNameFromDict)
+        }
 
         // Get overlay position (accessed from current thread)
         let overlayPosition = pendingOverlayPositions[chunkIndex] ?? .zero
@@ -729,10 +736,10 @@ public final class LIVAClient {
         }
 
         // PHASE 5: Clean up batch tracking
-        batchTrackingLock.lock()
-        pendingBatchCount.removeValue(forKey: chunkIndex)
-        deferredChunkReady.removeValue(forKey: chunkIndex)
-        batchTrackingLock.unlock()
+        batchTrackingLock.withLock {
+            pendingBatchCount.removeValue(forKey: chunkIndex)
+            deferredChunkReady.removeValue(forKey: chunkIndex)
+        }
     }
 
     private func handleAudioEnd() {
