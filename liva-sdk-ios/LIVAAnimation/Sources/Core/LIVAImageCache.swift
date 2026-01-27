@@ -7,6 +7,7 @@
 //
 
 import UIKit
+import QuartzCore
 
 /// Image cache with chunk-based eviction and automatic memory management
 class LIVAImageCache {
@@ -113,18 +114,41 @@ class LIVAImageCache {
             let imageStart = CACurrentMediaTime()
 
             // UIImage creation on background thread (previously blocking main thread)
-            guard let image = UIImage(data: data) else {
+            guard let rawImage = UIImage(data: data) else {
                 self.decrementPendingAndNotify(chunkIndex: chunkIndex)
                 completion?(false)
                 return
             }
 
             let imageTime = CACurrentMediaTime() - imageStart
+            let forceDecodeStart = CACurrentMediaTime()
+
+            // CRITICAL FIX: Force image decompression on background thread
+            // UIImage defers JPEG/PNG decompression until first draw, which was
+            // causing 100-270ms freezes when chunk 0 starts. By pre-rendering
+            // on background thread, we avoid blocking the render thread.
+            //
+            // Use iOS 15+ optimized API when available (faster), fallback to bitmap otherwise
+            let image: UIImage
+            if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
+                // iOS 15+ has optimized pre-rendering (faster than bitmap context)
+                image = prepared
+            } else {
+                // Fallback: draw to bitmap context to force decompression
+                let size = rawImage.size
+                let scale = rawImage.scale
+                UIGraphicsBeginImageContextWithOptions(size, false, scale)
+                rawImage.draw(in: CGRect(origin: .zero, size: size))
+                image = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
+                UIGraphicsEndImageContext()
+            }
+
+            let forceDecodeTime = CACurrentMediaTime() - forceDecodeStart
             let totalTime = CACurrentMediaTime() - startTime
 
             // Log slow processing (> 10ms)
             if totalTime > 0.010 {
-                print("[LIVAImageCache] ⏱️ Slow async process: key=\(key) total=\(String(format: "%.1f", totalTime * 1000))ms (base64=\(String(format: "%.1f", base64Time * 1000))ms, image=\(String(format: "%.1f", imageTime * 1000))ms)")
+                print("[LIVAImageCache] ⏱️ Slow async process: key=\(key) total=\(String(format: "%.1f", totalTime * 1000))ms (base64=\(String(format: "%.1f", base64Time * 1000))ms, image=\(String(format: "%.1f", imageTime * 1000))ms, forceDecode=\(String(format: "%.1f", forceDecodeTime * 1000))ms)")
             }
 
             // Store in cache (fast - minimal lock time)
@@ -134,6 +158,9 @@ class LIVAImageCache {
             self.lock.lock()
             self.decodedKeys.insert(key)
             self.lock.unlock()
+
+            // NOTE: Removed forceCoreAnimationCache() - was causing main thread blocking
+            // when many images decode simultaneously (batch processing)
 
             // Decrement pending and check if chunk is complete
             self.decrementPendingAndNotify(chunkIndex: chunkIndex)
@@ -178,6 +205,85 @@ class LIVAImageCache {
         }
     }
 
+    /// Process and cache raw image data asynchronously (FAST PATH - no base64)
+    /// This skips base64 decoding and goes straight to UIImage creation
+    /// - Parameters:
+    ///   - imageData: Raw image data (webp/png/jpg)
+    ///   - key: Cache key (format: "chunkIndex-sectionIndex-sequenceIndex")
+    ///   - chunkIndex: Chunk index for batch tracking
+    ///   - completion: Optional callback when image is cached (called on main queue)
+    func processAndCacheAsync(
+        imageData: Data,
+        key: String,
+        chunkIndex: Int,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        // Increment pending count for this chunk
+        lock.lock()
+        pendingOperations[chunkIndex, default: 0] += 1
+        lock.unlock()
+
+        // Process on background queue (non-blocking!)
+        let startTime = CACurrentMediaTime()
+        processingQueue.async { [weak self] in
+            guard let self = self else {
+                completion?(false)
+                return
+            }
+
+            let imageStart = CACurrentMediaTime()
+
+            // UIImage creation on background thread (no base64 decode needed!)
+            guard let rawImage = UIImage(data: imageData) else {
+                self.decrementPendingAndNotify(chunkIndex: chunkIndex)
+                completion?(false)
+                return
+            }
+
+            let imageTime = CACurrentMediaTime() - imageStart
+            let forceDecodeStart = CACurrentMediaTime()
+
+            // CRITICAL FIX: Force image decompression on background thread
+            let image: UIImage
+            if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
+                image = prepared
+            } else {
+                let size = rawImage.size
+                let scale = rawImage.scale
+                UIGraphicsBeginImageContextWithOptions(size, false, scale)
+                rawImage.draw(in: CGRect(origin: .zero, size: size))
+                image = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
+                UIGraphicsEndImageContext()
+            }
+
+            let forceDecodeTime = CACurrentMediaTime() - forceDecodeStart
+            let totalTime = CACurrentMediaTime() - startTime
+
+            // Log slow processing (> 10ms)
+            if totalTime > 0.010 {
+                print("[LIVAImageCache] ⏱️ Slow async process (raw): key=\(key) total=\(String(format: "%.1f", totalTime * 1000))ms (image=\(String(format: "%.1f", imageTime * 1000))ms, forceDecode=\(String(format: "%.1f", forceDecodeTime * 1000))ms)")
+            }
+
+            // Store in cache (fast - minimal lock time)
+            self.setImageInternal(image, forKey: key, chunkIndex: chunkIndex)
+
+            // Mark as decoded (image is fully ready for rendering)
+            self.lock.lock()
+            self.decodedKeys.insert(key)
+            self.lock.unlock()
+
+            // Decrement pending and check if chunk is complete
+            self.decrementPendingAndNotify(chunkIndex: chunkIndex)
+
+            // Call completion on main queue
+            if let completion = completion {
+                DispatchQueue.main.async {
+                    completion(true)
+                }
+            }
+        }
+    }
+
     // MARK: - Public Methods (Synchronous - for compatibility)
 
     /// Set image in cache with chunk tracking (synchronous version)
@@ -219,10 +325,13 @@ class LIVAImageCache {
 
         cache.setObject(image, forKey: key as NSString, cost: cost)
 
-        // Log first few cached images to debug key format
+        // DIAGNOSTICS: Record cache store
+        LIVAPerformanceTracker.shared.recordFrameCached(key: key, chunk: chunkIndex)
         let totalImages = chunkImageKeys.values.reduce(0) { $0 + $1.count }
-        if totalImages <= 10 {
-            print("[LIVAImageCache] ✅ Cached image: \(key), chunk: \(chunkIndex), size: \(image.size), total: \(totalImages)")
+
+        // Log first few cached images to debug key format (increased to 20 for better debugging)
+        if totalImages <= 20 {
+            print("[LIVAImageCache] ✅ STORE key='\(key)', chunk=\(chunkIndex), size=\(image.size), total=\(totalImages)")
         }
     }
 
@@ -230,7 +339,12 @@ class LIVAImageCache {
     /// - Parameter key: Image key
     /// - Returns: Cached image if available
     func getImage(forKey key: String) -> UIImage? {
-        return cache.object(forKey: key as NSString)
+        let image = cache.object(forKey: key as NSString)
+
+        // DIAGNOSTICS: Record cache lookup
+        LIVAPerformanceTracker.shared.recordFrameLookup(key: key, found: image != nil, chunk: -1)
+
+        return image
     }
 
     /// Check if image exists in cache
@@ -319,6 +433,24 @@ class LIVAImageCache {
         lock.lock()
         defer { lock.unlock() }
         return Array(chunkImageKeys[chunkIndex] ?? [])
+    }
+
+    /// Get count of images per chunk (for diagnostics)
+    func getChunkCounts() -> [Int: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        var counts: [Int: Int] = [:]
+        for (chunk, keys) in chunkImageKeys {
+            counts[chunk] = keys.count
+        }
+        return counts
+    }
+
+    /// Get count of decoded images (for diagnostics)
+    var decodedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return decodedKeys.count
     }
 
     // MARK: - Private Methods

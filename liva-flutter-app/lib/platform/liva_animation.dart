@@ -242,6 +242,36 @@ class LIVAAnimation {
     }
   }
 
+  /// DEBUG: Disable overlay rendering to test base frames + audio only
+  /// This helps isolate performance issues by rendering only base animation
+  static Future<void> setOverlayRenderingDisabled(bool disabled) async {
+    try {
+      await _channel.invokeMethod('setOverlayRenderingDisabled', {'disabled': disabled});
+    } on PlatformException catch (e) {
+      onError?.call(e.message ?? 'Set overlay rendering failed');
+    }
+  }
+
+  /// DEBUG: Start animation test mode - cycle through loaded animations
+  /// No chunks, no overlays, no audio - just pure base animation rendering
+  /// [cycles] Number of times to cycle through all loaded animations (default: 5)
+  static Future<void> startAnimationTest({int cycles = 5}) async {
+    try {
+      await _channel.invokeMethod('startAnimationTest', {'cycles': cycles});
+    } on PlatformException catch (e) {
+      onError?.call(e.message ?? 'Start animation test failed');
+    }
+  }
+
+  /// DEBUG: Stop animation test mode
+  static Future<void> stopAnimationTest() async {
+    try {
+      await _channel.invokeMethod('stopAnimationTest');
+    } on PlatformException catch (e) {
+      onError?.call(e.message ?? 'Stop animation test failed');
+    }
+  }
+
   // MARK: - Event Handlers
 
   static Future<dynamic> _handleMethodCall(MethodCall call) async {

@@ -6,6 +6,7 @@
 //
 
 import AVFoundation
+import QuartzCore
 
 /// Audio chunk for queued playback
 struct QueuedAudioChunk {
@@ -39,6 +40,12 @@ final class AudioPlayer: NSObject {
 
     /// Converter for MP3 to PCM
     private var audioConverter: AVAudioConverter?
+
+    /// Background queue for MP3 decoding (prevents main thread blocking)
+    private let decodeQueue = DispatchQueue(
+        label: "com.liva.audioDecoding",
+        qos: .userInitiated
+    )
 
     // MARK: - Callbacks
 
@@ -145,13 +152,19 @@ final class AudioPlayer: NSObject {
             self?.onChunkStart?(chunk.chunkIndex)
         }
 
-        // Decode and play
-        decodeAndPlay(chunk: chunk)
+        // CRITICAL FIX: Decode on BACKGROUND thread to prevent 656ms freeze
+        // MP3 decoding was blocking main thread causing animation to freeze
+        decodeQueue.async { [weak self] in
+            self?.decodeAndPlay(chunk: chunk)
+        }
     }
 
     /// Decode MP3 data and schedule for playback
+    /// RUNS ON BACKGROUND THREAD - heavy MP3 decoding happens here
     private func decodeAndPlay(chunk: QueuedAudioChunk) {
-        // Create audio file from data for decoding
+        let decodeStart = CACurrentMediaTime()
+
+        // BACKGROUND THREAD: Create audio file from data for decoding
         guard let tempURL = createTempFile(with: chunk.data) else {
             markChunkComplete(chunk.chunkIndex)
             playNextChunk()
@@ -163,6 +176,7 @@ final class AudioPlayer: NSObject {
         }
 
         do {
+            // BACKGROUND THREAD: Decode MP3 (this was the 656ms freeze!)
             let audioFile = try AVAudioFile(forReading: tempURL)
             let frameCount = AVAudioFrameCount(audioFile.length)
 
@@ -175,9 +189,10 @@ final class AudioPlayer: NSObject {
                 return
             }
 
+            // BACKGROUND THREAD: Read and decode entire MP3
             try audioFile.read(into: buffer)
 
-            // Convert to output format if needed
+            // BACKGROUND THREAD: Convert to output format if needed
             let playBuffer: AVAudioPCMBuffer
             if audioFile.processingFormat != playerNode?.outputFormat(forBus: 0) {
                 if let converted = convertBuffer(buffer, to: playerNode?.outputFormat(forBus: 0)) {
@@ -189,18 +204,28 @@ final class AudioPlayer: NSObject {
                 playBuffer = buffer
             }
 
-            // Schedule buffer
-            playerNode?.scheduleBuffer(playBuffer) { [weak self] in
-                self?.markChunkComplete(chunk.chunkIndex)
-                DispatchQueue.main.async {
-                    self?.onChunkComplete?(chunk.chunkIndex)
-                    self?.playNextChunk()
-                }
+            let decodeTime = (CACurrentMediaTime() - decodeStart) * 1000
+            if decodeTime > 10 {
+                print("[AudioPlayer] ⏱️ Audio decode: \(String(format: "%.1f", decodeTime))ms (chunk \(chunk.chunkIndex))")
             }
 
-            // Start playing if not already
-            if playerNode?.isPlaying == false {
-                playerNode?.play()
+            // MAIN THREAD: Schedule buffer with AVAudioPlayerNode
+            // AVAudioPlayerNode operations MUST happen on main thread
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+
+                self.playerNode?.scheduleBuffer(playBuffer) { [weak self] in
+                    self?.markChunkComplete(chunk.chunkIndex)
+                    DispatchQueue.main.async {
+                        self?.onChunkComplete?(chunk.chunkIndex)
+                        self?.playNextChunk()
+                    }
+                }
+
+                // Start playing if not already
+                if self.playerNode?.isPlaying == false {
+                    self.playerNode?.play()
+                }
             }
 
         } catch {

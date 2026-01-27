@@ -64,6 +64,13 @@ public class LIVAAnimationPlugin: NSObject, FlutterPlugin {
             // Call this BEFORE sending a new message to prevent stale overlay reuse
             LIVAClient.shared.forceIdleNow()
             result(nil)
+        case "setOverlayRenderingDisabled":
+            handleSetOverlayRenderingDisabled(call.arguments, result: result)
+        case "startAnimationTest":
+            handleStartAnimationTest(call.arguments, result: result)
+        case "stopAnimationTest":
+            LIVAClient.shared.stopAnimationTest()
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -120,6 +127,23 @@ public class LIVAAnimationPlugin: NSObject, FlutterPlugin {
         }
 
         canvasView?.showDebugInfo = enabled
+        result(nil)
+    }
+
+    private func handleSetOverlayRenderingDisabled(_ arguments: Any?, result: @escaping FlutterResult) {
+        guard let args = arguments as? [String: Any],
+              let disabled = args["disabled"] as? Bool else {
+            result(FlutterError(code: "INVALID_ARGS", message: "Missing disabled argument", details: nil))
+            return
+        }
+
+        LIVAClient.shared.setOverlayRenderingDisabled(disabled)
+        result(nil)
+    }
+
+    private func handleStartAnimationTest(_ arguments: Any?, result: @escaping FlutterResult) {
+        let cycles = (arguments as? [String: Any])?["cycles"] as? Int ?? 5
+        LIVAClient.shared.startAnimationTest(cycles: cycles)
         result(nil)
     }
 

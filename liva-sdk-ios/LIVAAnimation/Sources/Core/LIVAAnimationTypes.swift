@@ -167,7 +167,3 @@ func getOverlayCacheKey(for frame: OverlayFrame, chunkIndex: Int, sectionIndex: 
     return "\(chunkIndex)_\(sectionIndex)_\(sequenceIndex)"
 }
 
-/// Legacy positional key generator (deprecated - prefer getOverlayCacheKey)
-func getOverlayKey(chunkIndex: Int, sectionIndex: Int, sequenceIndex: Int) -> String {
-    return "\(chunkIndex)_\(sectionIndex)_\(sequenceIndex)"
-}

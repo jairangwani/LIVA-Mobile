@@ -8,6 +8,7 @@
 
 import UIKit
 import os.log
+import QuartzCore
 
 // Debug logger for animation engine
 private let animLogger = OSLog(subsystem: "com.liva.animation", category: "AnimationEngine")
@@ -89,6 +90,14 @@ class LIVAAnimationEngine {
 
     /// Delegate for audio playback events
     weak var delegate: LIVAAnimationEngineDelegate?
+
+    /// DEBUG: Disable overlay rendering to test base frames only
+    public var disableOverlayRendering: Bool = false
+
+    /// DEBUG: Test mode - cycle through base animations without chunks/audio
+    private var isTestMode: Bool = false
+    private var testAnimationQueue: [String] = []
+    private var testCurrentAnimIndex: Int = 0
 
     /// Current animation mode
     private var mode: AnimationMode = .idle
@@ -172,11 +181,11 @@ class LIVAAnimationEngine {
     private let alternateIdleAnimation = "idle_1_e_idle_1_s"
 
     /// Minimum frames needed before starting playback (adaptive buffering)
-    /// Reduced from 10 to 5 to minimize chunk transition delays
-    private let minFramesBeforeStart = 5
+    /// Match web frontend's MIN_FRAMES_BEFORE_START = 10
+    private let minFramesBeforeStart = 30  // Increased buffer for smoother decode
 
     /// Maximum wait time for buffer (milliseconds)
-    private let maxBufferWaitMs: Int = 3000
+    private let maxBufferWaitMs: Int = 1500
 
     // MARK: - Initialization
 
@@ -220,6 +229,52 @@ class LIVAAnimationEngine {
         animLog("[LIVAAnimationEngine] ⏹️ Stopped rendering")
     }
 
+    /// DEBUG: Start test mode - cycle through base animations only (no chunks, no audio)
+    /// This tests pure base animation rendering performance in isolation
+    /// - Parameter count: Number of animation cycles to play (default: 5)
+    public func startTestMode(cycles: Int = 5) {
+        animLog("[LIVAAnimationEngine] 🧪 Starting TEST MODE - \(cycles) animation cycles")
+        animLog("[LIVAAnimationEngine] 🧪 No chunks, no overlays, no audio - pure base animation test")
+
+        // Build test queue - cycle through loaded animations
+        testAnimationQueue = []
+        let loadedAnimations = Array(animationFrames.keys.sorted())
+
+        for _ in 0..<cycles {
+            testAnimationQueue.append(contentsOf: loadedAnimations)
+        }
+
+        animLog("[LIVAAnimationEngine] 🧪 Test queue: \(testAnimationQueue.count) animations (\(loadedAnimations.count) unique x \(cycles) cycles)")
+
+        testCurrentAnimIndex = 0
+        isTestMode = true
+        mode = .idle  // Use idle mode for frame advancement
+
+        // Start with first animation
+        if !testAnimationQueue.isEmpty {
+            currentOverlayBaseName = testAnimationQueue[0]
+            globalFrameIndex = 0
+            animLog("[LIVAAnimationEngine] 🧪 Starting animation 1/\(testAnimationQueue.count): \(currentOverlayBaseName)")
+        }
+
+        // Reset idle frame accumulator for immediate start
+        idleFrameAccumulator = 0.0
+
+        // Start rendering if not already started
+        if displayLink == nil {
+            startRendering()
+        }
+    }
+
+    /// DEBUG: Stop test mode
+    public func stopTestMode() {
+        animLog("[LIVAAnimationEngine] 🧪 Stopping TEST MODE")
+        isTestMode = false
+        testAnimationQueue = []
+        testCurrentAnimIndex = 0
+        mode = .idle
+    }
+
     /// Load base animation frames
     /// - Parameters:
     ///   - name: Animation name (e.g., "idle_1_s")
@@ -242,6 +297,11 @@ class LIVAAnimationEngine {
     ///   - animationName: Base animation name
     ///   - totalFrames: Total frames in overlay sequence
     func enqueueOverlaySet(frames: [OverlayFrame], chunkIndex: Int, animationName: String, totalFrames: Int) {
+        // VERBOSE LOGGING: Log what overlayId the first frame has
+        if let firstFrame = frames.first {
+            animLog("[LIVAAnimationEngine] 📥 RECEIVED chunk=\(chunkIndex) firstFrame.overlayId='\(firstFrame.overlayId ?? "nil")'")
+        }
+
         let section = OverlaySection(
             mode: "lips_data",
             frames: frames,
@@ -258,6 +318,9 @@ class LIVAAnimationEngine {
         )
 
         overlayQueue.append(queued)
+
+        // DIAGNOSTICS: Track chunk enqueued
+        LIVAPerformanceTracker.shared.recordChunkEnqueued(chunk: chunkIndex, frames: frames.count)
 
         animLog("[LIVAAnimationEngine] 📦 Enqueued overlay chunk \(chunkIndex), frames: \(frames.count), queue length: \(overlayQueue.count)")
 
@@ -299,6 +362,26 @@ class LIVAAnimationEngine {
     ) {
         imageCache.processAndCacheAsync(
             base64Data: base64Data,
+            key: key,
+            chunkIndex: chunkIndex,
+            completion: completion
+        )
+    }
+
+    /// Process and cache overlay image from raw Data (fast path)
+    /// - Parameters:
+    ///   - imageData: Raw image data (webp/png/jpg)
+    ///   - key: Cache key (format: "chunkIndex-sectionIndex-sequenceIndex")
+    ///   - chunkIndex: Chunk index for batch tracking
+    ///   - completion: Optional callback when done (called on main queue)
+    func processAndCacheOverlayImageAsync(
+        imageData: Data,
+        key: String,
+        chunkIndex: Int,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        imageCache.processAndCacheAsync(
+            imageData: imageData,
             key: key,
             chunkIndex: chunkIndex,
             completion: completion
@@ -375,6 +458,9 @@ class LIVAAnimationEngine {
     /// Call this when a new message is about to be sent to prevent stale overlay reuse
     /// This matches web frontend's forceIdleNow() behavior
     func forceIdleNow() {
+        // DIAGNOSTICS: Reset counters for new message
+        LIVAPerformanceTracker.shared.reset()
+
         // Stop any playing overlays
         mode = .idle
         globalFrameIndex = 0
@@ -432,11 +518,24 @@ class LIVAAnimationEngine {
 
         // FREEZE DETECTION: Log when frame delta is abnormally high (> 50ms = potential freeze)
         if deltaTime > 0.050 && drawCallCount > 10 {
-            animLog("[LIVAAnimationEngine] ⚠️ FREEZE DETECTED: deltaTime=\(String(format: "%.1f", deltaTime * 1000))ms (expected ~16ms)")
+            // Gather context about what might be causing the freeze
+            let currentChunk = overlaySections.first?.chunkIndex ?? -1
+            let currentSeq = overlayStates.first?.currentDrawingFrame ?? -1
+            let queueLength = overlayQueue.count
+            let cacheCount = imageCache.count
+            let decodedCount = imageCache.decodedCount
+
+            animLog("[LIVAAnimationEngine] ⚠️ FREEZE DETECTED: deltaTime=\(String(format: "%.1f", deltaTime * 1000))ms chunk=\(currentChunk) seq=\(currentSeq) queue=\(queueLength) cached=\(cacheCount) decoded=\(decodedCount)")
+
             LIVASessionLogger.shared.logEvent("FREEZE_DETECTED", details: [
                 "delta_ms": Int(deltaTime * 1000),
                 "draw_count": drawCallCount,
-                "mode": mode == .overlay ? "overlay" : "idle"
+                "mode": mode == .overlay ? "overlay" : "idle",
+                "chunk": currentChunk,
+                "seq": currentSeq,
+                "queue_len": queueLength,
+                "cache_count": cacheCount,
+                "decoded_count": decodedCount
             ])
         }
 
@@ -480,6 +579,7 @@ class LIVAAnimationEngine {
                 overlayStates[overlayDriven.sectionIndex].currentDrawingFrame = 0
                 // NOTE: skipFirstAdvance REMOVED - was causing frame 0 to draw twice
                 overlayStates[overlayDriven.sectionIndex].startTime = now
+
                 mode = .overlay
 
                 animLog("[LIVAAnimationEngine] 🎬 Starting overlay chunk \(overlayDriven.chunkIndex)")
@@ -538,7 +638,8 @@ class LIVAAnimationEngine {
         var hasOverlayImage: Bool = false
         var shouldSkipFrameAdvance: Bool = false  // PHASE 4: Skip advance if overlay not ready
 
-        if mode == .overlay {
+        // DEBUG: Skip overlay rendering if disabled
+        if mode == .overlay && !disableOverlayRendering {
             for (index, section) in overlaySections.enumerated() {
                 let state = overlayStates[index]
 
@@ -562,17 +663,30 @@ class LIVAAnimationEngine {
 
                 if !isOverlayDecoded {
                     // SKIP THIS FRAME - hold previous frame
-                    // Don't advance overlay counters (will be skipped in advanceOverlays)
                     shouldSkipFrameAdvance = true
                     hasOverlayImage = false
 
-                    // Log skip (but not every frame to avoid spam)
-                    if drawCallCount % 30 == 0 {
-                        animLog("[LIVAAnimationEngine] ⏸️ SKIP-DRAW: Overlay not decoded, holding previous frame. key=\(key), drawFrame=\(state.currentDrawingFrame)")
-                    }
+                    // DIAGNOSTICS: Record frame skipped
+                    LIVAPerformanceTracker.shared.recordFrameSkipped(reason: "Overlay not decoded")
+
+                    // IMPORTANT: Log every skip to track freeze issues
+                    // This helps identify which specific frames are causing pauses
+                    let isCached = imageCache.hasImage(forKey: key)
+                    animLog("[LIVAAnimationEngine] ⏸️ SKIP-DRAW: chunk=\(section.chunkIndex) seq=\(state.currentDrawingFrame) key=\(key) isCached=\(isCached) isDecoded=\(isOverlayDecoded)")
+
+                    // Log to session for user visibility
+                    LIVASessionLogger.shared.logEvent("SKIP_DRAW", details: [
+                        "chunk": section.chunkIndex,
+                        "seq": state.currentDrawingFrame,
+                        "is_cached": isCached,
+                        "is_decoded": isOverlayDecoded
+                    ])
                 } else if let overlayImage = imageCache.getImage(forKey: key) {
                     overlaysToRender.append((overlayImage, overlayFrame.coordinates))
                     hasOverlayImage = true
+
+                    // DIAGNOSTICS: Record frame rendered
+                    LIVAPerformanceTracker.shared.recordFrameRendered(chunk: section.chunkIndex, seq: state.currentDrawingFrame)
 
                     // Log image size to verify correct image
                     if state.currentDrawingFrame == 0 || state.currentDrawingFrame % 30 == 0 {
@@ -673,6 +787,24 @@ class LIVAAnimationEngine {
         let renderTime = CACurrentMediaTime() - renderStart
         let totalDrawTime = CACurrentMediaTime() - drawStartTime
 
+        // COMPREHENSIVE FRAME TIMING: Track every frame with detailed breakdown
+        let timing = FrameTimingBreakdown(
+            frameNumber: drawCallCount,
+            timestamp: now,
+            deltaFromLastFrame: deltaTime * 1000,  // Convert to ms
+            baseImageLookup: 0,  // We don't separately time base lookup (it's fast)
+            overlayLookup: cacheLookupTime * 1000,
+            overlayDecode: 0,  // Decode happens async, not in draw()
+            metalRender: renderTime * 1000,
+            totalDrawTime: totalDrawTime * 1000,
+            mode: mode == .overlay ? "overlay" : "idle",
+            chunk: currentChunkIndex,
+            seq: currentOverlaySeq,
+            wasSkipped: shouldSkipFrameAdvance
+        )
+        LIVAFrameTimingTracker.shared.logFrame(timing)
+
+        // DIAGNOSTICS: Record draw call with detailed info (only in overlay mode, every 10th frame to reduce overhead)
         // SLOW FRAME DETECTION: Log immediately when draw takes too long (> 20ms)
         if totalDrawTime > 0.020 {
             animLog("[LIVAAnimationEngine] 🐢 SLOW FRAME: total=\(String(format: "%.1f", totalDrawTime * 1000))ms cache=\(String(format: "%.1f", cacheLookupTime * 1000))ms render=\(String(format: "%.1f", renderTime * 1000))ms")
@@ -789,9 +921,23 @@ class LIVAAnimationEngine {
         let hasImage = imageCache.hasImage(forKey: key)
         let isDecoded = imageCache.isImageDecoded(forKey: key)
 
-        if (!hasImage || !isDecoded) && drawCallCount % 100 == 1 {
-            animLog("[LIVAAnimationEngine] ❌ First frame not ready, key: \(key), hasImage: \(hasImage), isDecoded: \(isDecoded), cache count: \(imageCache.count)")
+        // DIAGNOSTICS: Log every check for first frame (critical for debugging)
+        if !hasImage || !isDecoded {
+            // Log more frequently for debugging (every 30th frame instead of 100th)
+            if drawCallCount % 30 == 1 {
+                animLog("[LIVAAnimationEngine] ❌ First frame NOT ready: key='\(key)', hasImage=\(hasImage), isDecoded=\(isDecoded), cacheCount=\(imageCache.count), overlayId='\(firstFrame.overlayId ?? "nil")'")
+
+                // DIAGNOSTICS: Record first frame not ready
+                LIVAPerformanceTracker.shared.logEvent(
+                    category: "BUFFER",
+                    event: "FIRST_FRAME_NOT_READY"
+                )
+            }
+        } else if drawCallCount % 100 == 1 {
+            // Log success occasionally for debugging
+            animLog("[LIVAAnimationEngine] ✅ First frame READY: key='\(key)', chunk=\(section.chunkIndex)")
         }
+
         return hasImage && isDecoded
     }
 
@@ -891,6 +1037,10 @@ class LIVAAnimationEngine {
                     state.holdingLastFrame = false
                     // Clear prefetch flag for current chunk (memory cleanup)
                     nextChunkReady.removeValue(forKey: section.chunkIndex)
+
+                    // DIAGNOSTICS: Record chunk playback completed
+                    LIVAPerformanceTracker.shared.recordChunkPlaybackCompleted(chunkIndex: section.chunkIndex)
+
                     animLog("[LIVAAnimationEngine] ✅ Overlay chunk \(section.chunkIndex) finished")
                 } else {
                     // Not last frame - advance normally
@@ -920,6 +1070,21 @@ class LIVAAnimationEngine {
             let nextFrame = globalFrameIndex + 1
 
             if nextFrame >= baseFrames.count {
+                // DEBUG: Test mode - advance to next animation in queue
+                if isTestMode {
+                    testCurrentAnimIndex += 1
+                    if testCurrentAnimIndex < testAnimationQueue.count {
+                        currentOverlayBaseName = testAnimationQueue[testCurrentAnimIndex]
+                        globalFrameIndex = 0
+                        animLog("[LIVAAnimationEngine] 🧪 TEST: Animation \(testCurrentAnimIndex + 1)/\(testAnimationQueue.count): \(currentOverlayBaseName)")
+                    } else {
+                        // Test complete
+                        animLog("[LIVAAnimationEngine] 🧪 TEST COMPLETE - played \(testAnimationQueue.count) animations")
+                        stopTestMode()
+                    }
+                    return
+                }
+
                 // Animation finished - switch to alternate idle animation
                 let nextAnim: String
                 if currentOverlayBaseName == defaultIdleAnimation {
@@ -988,6 +1153,9 @@ class LIVAAnimationEngine {
             self.delegate?.animationEngineDidFinishAllChunks(self)
         }
 
+        // DIAGNOSTICS: Print performance report when animation finishes
+        LIVAPerformanceTracker.shared.printReport()
+
         animLog("[LIVAAnimationEngine] 💤 Transitioned to idle: \(currentOverlayBaseName), cleared all overlay caches and audio")
     }
 
@@ -1033,9 +1201,20 @@ class LIVAAnimationEngine {
 
     /// Start next overlay set from queue
     private func startNextOverlaySetIfAny() {
-        guard !isSetPlaying && !overlayQueue.isEmpty else { return }
+        guard !isSetPlaying && !overlayQueue.isEmpty else {
+            animLog("[LIVAAnimationEngine] 🔍 startNextOverlaySetIfAny: isSetPlaying=\(isSetPlaying), queueEmpty=\(overlayQueue.isEmpty)")
+            return
+        }
 
         let queued = overlayQueue.removeFirst()
+
+        // VERBOSE LOGGING: Log buffer check details
+        if let firstFrame = queued.section.frames.first {
+            let lookupKey = getOverlayCacheKey(for: firstFrame, chunkIndex: queued.section.chunkIndex, sectionIndex: queued.section.sectionIndex, sequenceIndex: 0)
+            let hasImage = imageCache.hasImage(forKey: lookupKey)
+            let isDecoded = imageCache.isImageDecoded(forKey: lookupKey)
+            animLog("[LIVAAnimationEngine] 🔍 BUFFER_CHECK chunk=\(queued.section.chunkIndex) lookupKey='\(lookupKey)' hasImage=\(hasImage) isDecoded=\(isDecoded) cacheCount=\(imageCache.count)")
+        }
 
         // Check if buffer is ready (adaptive buffering)
         if !isBufferReady(queued.section) {
@@ -1043,7 +1222,7 @@ class LIVAAnimationEngine {
 
             if waitedMs < maxBufferWaitMs {
                 // Buffer not ready, re-queue and retry
-                animLog("[LIVAAnimationEngine] ⏳ Buffer not ready, waited \(waitedMs)ms, re-queueing")
+                animLog("[LIVAAnimationEngine] ⏳ Buffer not ready, waited \(waitedMs)ms, re-queueing chunk=\(queued.section.chunkIndex)")
                 overlayQueue.insert(queued, at: 0)
 
                 // Retry after 100ms
@@ -1053,8 +1232,10 @@ class LIVAAnimationEngine {
                 return
             } else {
                 // Timeout exceeded, start anyway
-                animLog("[LIVAAnimationEngine] ⚠️ Buffer timeout (\(waitedMs)ms), starting anyway")
+                animLog("[LIVAAnimationEngine] ⚠️ Buffer timeout (\(waitedMs)ms), starting anyway for chunk=\(queued.section.chunkIndex)")
             }
+        } else {
+            animLog("[LIVAAnimationEngine] ✅ Buffer IS ready for chunk=\(queued.section.chunkIndex)")
         }
 
         let state = OverlayState(
@@ -1071,6 +1252,9 @@ class LIVAAnimationEngine {
         overlayStates = [state]
         isSetPlaying = true
 
+        // DIAGNOSTICS: Track chunk started
+        LIVAPerformanceTracker.shared.recordChunkStarted(chunk: queued.section.chunkIndex)
+
         animLog("[LIVAAnimationEngine] 🚀 Processed overlay set, chunk: \(queued.section.chunkIndex)")
     }
 
@@ -1078,7 +1262,10 @@ class LIVAAnimationEngine {
     /// PHASE 3: Uses isImageDecoded() to ensure images are fully decoded, not just cached
     /// This matches web frontend's behavior where buffer readiness checks img._decoded flag
     private func isBufferReady(_ section: OverlaySection) -> Bool {
-        guard !section.frames.isEmpty else { return false }
+        guard !section.frames.isEmpty else {
+            animLog("[LIVAAnimationEngine] 🔍 isBufferReady: section.frames is EMPTY!")
+            return false
+        }
 
         let framesToCheck = min(section.frames.count, minFramesBeforeStart)
         var readyCount = 0
@@ -1095,16 +1282,27 @@ class LIVAAnimationEngine {
                 sequenceIndex: i
             )
 
+            let hasImage = imageCache.hasImage(forKey: key)
+            let isDecoded = imageCache.isImageDecoded(forKey: key)
+
+            // VERBOSE LOGGING: Log each frame check
+            if i < 3 {
+                animLog("[LIVAAnimationEngine] 🔍 isBufferReady frame[\(i)] key='\(key)' hasImage=\(hasImage) isDecoded=\(isDecoded) overlayId='\(frame.overlayId ?? "nil")'")
+            }
+
             // Check BOTH cached AND decoded (not just hasImage)
             // Image must be fully decoded to be render-ready
-            if imageCache.hasImage(forKey: key) && imageCache.isImageDecoded(forKey: key) {
+            if hasImage && isDecoded {
                 readyCount += 1
             } else {
+                animLog("[LIVAAnimationEngine] ❌ isBufferReady FAILED at frame[\(i)] key='\(key)' hasImage=\(hasImage) isDecoded=\(isDecoded)")
                 break // Stop at first not-ready frame
             }
         }
 
-        return readyCount >= minFramesBeforeStart
+        let isReady = readyCount >= minFramesBeforeStart
+        animLog("[LIVAAnimationEngine] 🔍 isBufferReady result: readyCount=\(readyCount)/\(minFramesBeforeStart) -> \(isReady ? "READY" : "NOT READY")")
+        return isReady
     }
 
     // MARK: - Debug Info

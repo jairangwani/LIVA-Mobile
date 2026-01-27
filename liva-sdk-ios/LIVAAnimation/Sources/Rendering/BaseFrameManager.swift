@@ -7,8 +7,12 @@
 
 import UIKit
 
-/// Animation loading priority order (matches frontend)
-/// Includes both talking_1 and talking_2 variants as backend may use either
+/// Animation loading PRIORITY order (determines which animations load first)
+/// NOTE: The actual list of animations comes from the server manifest via
+/// request_base_animations_manifest socket event. This list is used for:
+/// 1. Priority ordering (animations listed here load before unlisted ones)
+/// 2. Fallback when manifest isn't available yet (cache loading at startup)
+/// The server manifest is the SOURCE OF TRUTH for which animations exist.
 let ANIMATION_LOAD_ORDER: [String] = [
     // Idle animations (highest priority - unlocks UI)
     "idle_1_s_idle_1_e",           // First priority - unlocks UI
@@ -25,6 +29,10 @@ let ANIMATION_LOAD_ORDER: [String] = [
     "talking_2_s_talking_2_e",     // Main talking_2 animation
     "talking_2_e_idle_1_s",        // Transition: talking_2 -> idle
     "talking_2_e_talking_2_s",     // Talking_2 loop
+
+    // Cross-variant transitions (backend may switch between talking_1 and talking_2)
+    "talking_1_e_talking_2_s",     // Transition: talking_1 -> talking_2
+    "talking_2_e_talking_1_s",     // Transition: talking_2 -> talking_1
 
     // Hi animations (optional)
     "idle_1_e_hi_1_s",             // Transition: idle -> hi
@@ -334,7 +342,20 @@ final class BaseFrameManager {
 
         for (index, fileURL) in frameFiles.enumerated() {
             if let data = try? Data(contentsOf: fileURL),
-               let image = UIImage(data: data) {
+               let rawImage = UIImage(data: data) {
+                // CRITICAL: Force image decompression at load time
+                // UIImage defers JPEG/PNG decompression until first draw, which
+                // causes freezes during animation. Pre-decode on startup so base
+                // frames are ready to render immediately.
+                let image: UIImage
+                if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
+                    image = prepared
+                } else {
+                    UIGraphicsBeginImageContextWithOptions(rawImage.size, false, rawImage.scale)
+                    rawImage.draw(in: CGRect(origin: .zero, size: rawImage.size))
+                    image = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
+                    UIGraphicsEndImageContext()
+                }
                 addFrame(image, animationName: animationName, frameIndex: index)
             }
         }

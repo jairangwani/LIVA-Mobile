@@ -166,6 +166,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           },
         ),
         IconButton(
+          icon: const Icon(Icons.play_circle_outline),
+          tooltip: 'Test Base Animations (No chunks/audio)',
+          onPressed: _startAnimationTest,
+        ),
+        IconButton(
           icon: const Icon(Icons.article_outlined),
           tooltip: 'View SDK Logs',
           onPressed: _showDebugLogs,
@@ -554,6 +559,44 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _reconnect() async {
     await LIVAAnimation.disconnect();
     await _initializeAnimation();
+  }
+
+  Future<void> _startAnimationTest() async {
+    // Show confirmation dialog
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Animation Test Mode'),
+        content: const Text(
+          'This will cycle through all loaded base animations 5 times.\n\n'
+          'NO chunks, NO overlays, NO audio - just pure base animation rendering.\n\n'
+          'This tests if freezes are caused by base animations or by the chunk/overlay system.\n\n'
+          'Watch for any freezes during playback.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Start Test'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await LIVAAnimation.startAnimationTest(cycles: 5);
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🧪 Animation test started - watch for freezes'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    }
   }
 
   Future<void> _showDebugLogs() async {

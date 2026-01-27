@@ -50,7 +50,8 @@ final class LIVASocketManager {
 
     /// Individual frame data
     struct FrameData {
-        let imageData: String
+        let imageData: String  // Base64 string (legacy)
+        let imageDataRaw: Data?  // Raw binary data (preferred - avoids base64 roundtrip)
         let imageMime: String
         let spriteIndexFolder: Int
         let sheetFilename: String
@@ -399,17 +400,27 @@ final class LIVASocketManager {
                 }
 
                 // Handle image_data - can be either Data (binary) or String (base64)
+                // OPTIMIZATION: Store raw Data when available to avoid base64 encode+decode
                 var imageDataString = ""
+                var imageDataRaw: Data? = nil
                 if let binaryData = frameDict["image_data"] as? Data {
-                    // Backend sends binary data directly - convert to base64 for storage
-                    imageDataString = binaryData.base64EncodedString()
+                    // Backend sends binary data - store raw (avoids base64 roundtrip!)
+                    imageDataRaw = binaryData
+                    imageDataString = ""  // Empty string as fallback
                 } else if let stringData = frameDict["image_data"] as? String {
                     // Already base64 string
                     imageDataString = stringData
                 }
 
+                // VERBOSE LOGGING: Log overlay_id from backend
+                let overlayIdFromBackend = frameDict["overlay_id"] as? String
+                if frames.count < 3 {
+                    socketLog("[LIVASocketManager] 🔍 FRAME_DATA seq=\(frameDict["sequence_index"] ?? -1) overlay_id='\(overlayIdFromBackend ?? "nil")' anim='\(frameDict["animation_name"] ?? "")' spriteNum=\(frameDict["matched_sprite_frame_number"] ?? -1) sheet='\(frameDict["sheet_filename"] ?? "")' raw=\(imageDataRaw != nil)")
+                }
+
                 let frame = FrameData(
                     imageData: imageDataString,
+                    imageDataRaw: imageDataRaw,
                     imageMime: frameDict["image_mime"] as? String ?? "image/webp",
                     spriteIndexFolder: frameDict["sprite_index_folder"] as? Int ?? 0,
                     sheetFilename: frameDict["sheet_filename"] as? String ?? "",
@@ -419,7 +430,7 @@ final class LIVASocketManager {
                     frameIndex: frameDict["frame_index"] as? Int ?? 0,
                     matchedSpriteFrameNumber: frameDict["matched_sprite_frame_number"] as? Int ?? 0,
                     char: frameDict["char"] as? String ?? "",
-                    overlayId: frameDict["overlay_id"] as? String
+                    overlayId: overlayIdFromBackend
                 )
                 frames.append(frame)
             }

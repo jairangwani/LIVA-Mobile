@@ -7,6 +7,7 @@
 
 import UIKit
 import os.log
+import QuartzCore
 
 // Debug logger for LIVA client
 private let clientLogger = OSLog(subsystem: "com.liva.animation", category: "LIVAClient")
@@ -96,6 +97,32 @@ public final class LIVAClient {
     /// Batch size for frame processing (matches web frontend's 15)
     private let frameBatchSize = 15
 
+    /// Background queue for frame processing (prevents main thread blocking)
+    private let frameProcessingQueue = DispatchQueue(label: "com.liva.frameProcessing", qos: .userInitiated)
+
+    /// CONCURRENT DECODE: Queue of frames waiting to be decoded
+    private var frameDecodeQueue: [(frame: LIVASocketManager.FrameData, chunkIndex: Int)] = []
+    private let decodeQueueLock = NSLock()
+
+    /// Maximum concurrent decode operations (streaming approach)
+    /// 1 worker = simple sequential processing, no lock contention
+    /// Overlay images are small and fast - one worker is sufficient for 30fps
+    /// This is a streaming app, not batch processing - decode as we play
+    private let maxConcurrentDecodes: Int = 1
+
+    /// Pending base animation to play after all chunks finish (like web's pendingBaseAtEndRef)
+    /// Set when backend sends play_base_animation event, used when transitioning to idle
+    private var pendingBaseAtEnd: String?
+
+    /// Animation names from server manifest (source of truth for available animations)
+    /// This replaces the hardcoded ANIMATION_LOAD_ORDER as the list of animations to load
+    private var manifestAnimationNames: [String] = []
+
+    /// Set of animation names that have been fully loaded and are ready for use
+    /// Updated as animations complete loading from cache or server
+    /// Used to tell backend which animations are available (matches web's getReadyAnimations)
+    private var loadedAnimationNames: Set<String> = []
+
     // MARK: - Public Methods
 
     /// Configure the SDK with connection parameters
@@ -134,6 +161,34 @@ public final class LIVAClient {
         clientLog("[LIVAClient] ✅ Attached canvas view and initialized new animation engine with audio sync")
     }
 
+    /// DEBUG: Disable overlay rendering to test base frames + audio only
+    /// - Parameter disable: True to disable overlays, false to enable (default: false)
+    public func setOverlayRenderingDisabled(_ disable: Bool) {
+        newAnimationEngine?.disableOverlayRendering = disable
+        clientLog("[LIVAClient] 🎬 Overlay rendering \(disable ? "DISABLED" : "ENABLED")")
+    }
+
+    /// DEBUG: Start test mode - cycle through base animations only
+    /// No chunks, no overlays, no audio - pure base animation rendering test
+    /// - Parameter cycles: Number of times to cycle through all loaded animations (default: 5)
+    public func startAnimationTest(cycles: Int = 5) {
+        newAnimationEngine?.startTestMode(cycles: cycles)
+        clientLog("[LIVAClient] 🧪 Started animation test mode: \(cycles) cycles")
+    }
+
+    /// DEBUG: Stop test mode
+    public func stopAnimationTest() {
+        newAnimationEngine?.stopTestMode()
+        clientLog("[LIVAClient] 🧪 Stopped animation test mode")
+    }
+
+    /// Get list of loaded animation names (for Flutter bridge or direct API use)
+    /// Backend uses this to only select from animations the frontend has available
+    /// - Returns: Array of animation names that are fully loaded, in priority order
+    public func getLoadedAnimations() -> [String] {
+        return getReadyAnimations()
+    }
+
     /// Connect to the backend server
     public func connect() {
         guard let config = configuration else {
@@ -143,6 +198,9 @@ public final class LIVAClient {
 
         state = .connecting
 
+        // Reset performance tracker for new session
+        LIVAPerformanceTracker.shared.reset()
+
         // Create socket manager
         socketManager = LIVASocketManager(configuration: config)
         setupSocketCallbacks()
@@ -151,6 +209,9 @@ public final class LIVAClient {
 
     /// Disconnect from the server
     public func disconnect() {
+        // Print final performance report before disconnecting
+        LIVAPerformanceTracker.shared.printReport()
+
         // End session logging before disconnect
         LIVASessionLogger.shared.endSession {
             clientLog("[LIVAClient] 📊 Ended logging session")
@@ -177,16 +238,19 @@ public final class LIVAClient {
         // Clear animation engine caches and state
         newAnimationEngine?.forceIdleNow()
 
-        // Clear pending state in client
+        // Clear pending state in client (only accessed from main thread)
         pendingOverlayPositions.removeAll()
+
+        // THREAD SAFETY: Clear shared state under lock
+        batchTrackingLock.lock()
         pendingOverlayFrames.removeAll()
         chunkAnimationNames.removeAll()
-
-        // PHASE 5: Clear batch tracking state
-        batchTrackingLock.lock()
         pendingBatchCount.removeAll()
         deferredChunkReady.removeAll()
         batchTrackingLock.unlock()
+
+        // Clear pending base animation (like web's pendingBaseAtEndRef.current = null)
+        pendingBaseAtEnd = nil
 
         // Update state if we were animating
         if state == .animating {
@@ -287,21 +351,41 @@ public final class LIVAClient {
 
     // NEW - Handle animations manifest and request animations
     // Manifest format: { "animation_name": {"frames": N, "version": "xxx"}, ... }
+    // Uses manifest as SOURCE OF TRUTH for available animations (not hardcoded list)
     private func handleAnimationsManifest(_ animations: [String: Any]) {
         guard let config = configuration else { return }
 
-        let animationNames = Set(animations.keys)
-        clientLog("[LIVAClient] 📋 Received manifest with \(animationNames.count) animations: \(Array(animationNames).prefix(5))...")
+        let animationNamesSet = Set(animations.keys)
+        clientLog("[LIVAClient] 📋 Received manifest with \(animationNamesSet.count) animations")
 
-        // Request animations in priority order
+        // Build prioritized list: animations in ANIMATION_LOAD_ORDER first (in order),
+        // then any additional animations from manifest that aren't in the priority list
+        var orderedAnimations: [String] = []
+
+        // First: add animations from priority list that exist in manifest
         for animationName in ANIMATION_LOAD_ORDER {
-            // Check if animation exists in manifest (animations is a dictionary with animation names as keys)
-            if animationNames.contains(animationName) {
-                clientLog("[LIVAClient] 📤 Requesting animation: \(animationName)")
-                socketManager?.requestBaseAnimation(name: animationName, agentId: config.agentId)
-            } else {
-                clientLog("[LIVAClient] ⚠️ Animation not in manifest: \(animationName)")
+            if animationNamesSet.contains(animationName) {
+                orderedAnimations.append(animationName)
             }
+        }
+
+        // Second: add any additional animations from manifest not in priority list
+        let prioritySet = Set(ANIMATION_LOAD_ORDER)
+        for animationName in animations.keys.sorted() {
+            if !prioritySet.contains(animationName) {
+                orderedAnimations.append(animationName)
+                clientLog("[LIVAClient] 📋 Found additional animation from manifest: \(animationName)")
+            }
+        }
+
+        // Store manifest animation names for later use (cache loading, etc.)
+        manifestAnimationNames = orderedAnimations
+        clientLog("[LIVAClient] 📋 Will load \(orderedAnimations.count) animations in priority order")
+
+        // Request ALL animations from manifest in priority order
+        for animationName in orderedAnimations {
+            clientLog("[LIVAClient] 📤 Requesting animation: \(animationName)")
+            socketManager?.requestBaseAnimation(name: animationName, agentId: config.agentId)
         }
     }
 
@@ -341,79 +425,127 @@ public final class LIVAClient {
         let frameCount = frameBatch.frames.count
         let frames = frameBatch.frames
 
-        clientLog("[LIVAClient] 📥 handleFrameBatchReceived: chunk=\(chunkIndex), batch=\(batchIndex), frames=\(frameCount)")
-
-        // Initialize tracking arrays for this chunk if needed (once per chunk)
-        if pendingOverlayFrames[chunkIndex] == nil {
-            pendingOverlayFrames[chunkIndex] = []
-            pendingOverlayFrames[chunkIndex]?.reserveCapacity(120) // Typical chunk size
-        }
-
-        // PHASE 1 & 5: Increment pending batch count (track async processing)
+        // PHASE 1 & 5: Increment pending batch count IMMEDIATELY (before async)
         batchTrackingLock.lock()
         pendingBatchCount[chunkIndex, default: 0] += 1
         batchTrackingLock.unlock()
 
-        // Cache engine reference once
+        // Initialize tracking arrays for this chunk if needed (thread-safe)
+        batchTrackingLock.lock()
+        if pendingOverlayFrames[chunkIndex] == nil {
+            pendingOverlayFrames[chunkIndex] = []
+            pendingOverlayFrames[chunkIndex]?.reserveCapacity(120)
+        }
+        batchTrackingLock.unlock()
+
+        // Cache engine reference
         let engine = newAnimationEngine
 
-        // PHASE 1: Process FIRST frame immediately (critical for playback start)
-        // This ensures the first overlay is available ASAP for buffer readiness check
-        if let firstFrame = frames.first {
-            processFrameMetadata(firstFrame, chunkIndex: chunkIndex, engine: engine)
-        }
+        // PERF FIX: Move ALL frame processing to background queue
+        // This prevents main thread blocking during frame batch arrival
+        frameProcessingQueue.async { [weak self] in
+            guard let self = self else { return }
 
-        // PHASE 1: Process remaining frames in batches with yields to event loop
-        // This matches web frontend's pattern: setTimeout(0) between batches
-        if frames.count > 1 {
-            var currentIndex = 1
+            // Log batch received (now on background thread)
+            clientLog("[LIVAClient] 📥 handleFrameBatchReceived: chunk=\(chunkIndex), batch=\(batchIndex), frames=\(frameCount)")
 
-            func processNextBatch() {
-                let endIndex = min(currentIndex + self.frameBatchSize, frames.count)
+            // DIAGNOSTICS: Record frames received in single batch call (reduces overhead)
+            LIVAPerformanceTracker.shared.recordFramesReceivedBatch(chunk: chunkIndex, count: frameCount)
 
-                // Process batch of frames
-                for i in currentIndex..<endIndex {
-                    self.processFrameMetadata(frames[i], chunkIndex: chunkIndex, engine: engine)
-                }
-
-                currentIndex = endIndex
-
-                // If more frames, yield to run loop then continue
-                if currentIndex < frames.count {
-                    DispatchQueue.main.async {
-                        processNextBatch()
-                    }
-                } else {
-                    // Batch complete - decrement pending count and check for deferred chunk ready
-                    self.onBatchComplete(chunkIndex: chunkIndex)
-                }
+            // RATE LIMITING: Queue frames for one-at-a-time processing
+            // This prevents flooding the system with 100+ decode operations at once
+            self.decodeQueueLock.lock()
+            for frame in frames {
+                self.frameDecodeQueue.append((frame: frame, chunkIndex: chunkIndex))
             }
+            self.decodeQueueLock.unlock()
 
-            // Start batch processing after yielding to run loop
+            // Start processing if not already running
+            self.startRateLimitedFrameProcessing(engine: engine)
+
+            // Batch complete - notify on main thread
             DispatchQueue.main.async {
-                processNextBatch()
+                self.onBatchComplete(chunkIndex: chunkIndex)
             }
-        } else {
-            // Only one frame - mark batch complete immediately
-            onBatchComplete(chunkIndex: chunkIndex)
         }
+    }
 
-        // NOTE: Legacy frameDecoder path removed - was causing double decode work
-        // The new processFrameMetadata() path handles all frame processing
+    /// CONCURRENT DECODE: Process frames with controlled parallelism
+    /// Decodes multiple frames simultaneously but throttles to maxConcurrentDecodes
+    /// This keeps decode ahead of 30fps playback without flooding the system
+    private func startRateLimitedFrameProcessing(engine: LIVAAnimationEngine?) {
+        // Kick off parallel decode workers up to max concurrency
+        for _ in 0..<maxConcurrentDecodes {
+            frameProcessingQueue.async { [weak self] in
+                self?.processNextFrameInQueue(engine: engine)
+            }
+        }
+    }
+
+    /// Process next frame in queue (concurrent worker)
+    /// Multiple workers run in parallel, each grabbing next frame from queue
+    private func processNextFrameInQueue(engine: LIVAAnimationEngine?) {
+        while true {
+            decodeQueueLock.lock()
+
+            // Queue empty? This worker exits
+            guard !frameDecodeQueue.isEmpty else {
+                decodeQueueLock.unlock()
+                return
+            }
+
+            // Get next frame
+            let item = frameDecodeQueue.removeFirst()
+            let queueSize = frameDecodeQueue.count
+            decodeQueueLock.unlock()
+
+            // Process this frame (decode happens here - this is the slow operation)
+            self.processFrameMetadata(item.frame, chunkIndex: item.chunkIndex, engine: engine)
+
+            // Log progress every 50 frames
+            if item.frame.sequenceIndex % 50 == 0 {
+                clientLog("[LIVAClient] 🔄 Decode progress: seq=\(item.frame.sequenceIndex), queue=\(queueSize)")
+            }
+        }
     }
 
     /// Process a single frame's metadata and queue async image decode
     /// PHASE 1: Extracted for batched processing
+    /// NOTE: Thread-safe - can be called from background queue
     private func processFrameMetadata(_ frame: LIVASocketManager.FrameData, chunkIndex: Int, engine: LIVAAnimationEngine?) {
         let contentKey = frame.contentBasedCacheKey
 
-        // ASYNC: Decode image on background (just dispatch, no completion closure overhead)
-        engine?.processAndCacheOverlayImageAsync(
-            base64Data: frame.imageData,
-            key: contentKey,
-            chunkIndex: chunkIndex,
-            completion: nil  // Skip completion to reduce overhead
-        )
+        // VERBOSE LOGGING: Log every frame's store key (first 20 per chunk for better visibility)
+        if frame.sequenceIndex < 20 {
+            clientLog("[LIVAClient] 💾 FRAME_ARRIVE chunk=\(chunkIndex) seq=\(frame.sequenceIndex) key='\(contentKey)'")
+        }
+
+        // ASYNC: Decode image on background (already thread-safe)
+        // This starts decoding IMMEDIATELY for ALL frames as they arrive
+        // OPTIMIZATION: Only pass completion callback for first 20 frames (avoid flooding main queue)
+        // OPTIMIZATION: Use raw Data when available (skip base64 roundtrip)
+        let needsLogging = frame.sequenceIndex < 20
+        if let rawData = frame.imageDataRaw {
+            // Fast path: decode directly from Data (no base64 overhead)
+            engine?.processAndCacheOverlayImageAsync(
+                imageData: rawData,
+                key: contentKey,
+                chunkIndex: chunkIndex,
+                completion: needsLogging ? { success in
+                    clientLog("[LIVAClient] ✅ FRAME_DECODED chunk=\(chunkIndex) seq=\(frame.sequenceIndex) success=\(success) [raw]")
+                } : nil
+            )
+        } else {
+            // Legacy path: decode from base64 string
+            engine?.processAndCacheOverlayImageAsync(
+                base64Data: frame.imageData,
+                key: contentKey,
+                chunkIndex: chunkIndex,
+                completion: needsLogging ? { success in
+                    clientLog("[LIVAClient] ✅ FRAME_DECODED chunk=\(chunkIndex) seq=\(frame.sequenceIndex) success=\(success) [b64]")
+                } : nil
+            )
+        }
 
         // Build OverlayFrame (struct copy is fast)
         let overlayFrame = OverlayFrame(
@@ -429,35 +561,43 @@ public final class LIVAClient {
             viseme: nil
         )
 
-        // Append to pending frames
+        // THREAD SAFETY: Lock when accessing shared state
+        batchTrackingLock.lock()
         pendingOverlayFrames[chunkIndex]?.append(overlayFrame)
-
-        // Track animation name
         if !frame.animationName.isEmpty && chunkAnimationNames[chunkIndex] == nil {
             chunkAnimationNames[chunkIndex] = frame.animationName
         }
+        batchTrackingLock.unlock()
     }
 
     /// PHASE 5: Called when a batch finishes processing
     /// Decrements pending count and processes deferred chunk_ready if all batches done
+    /// NOTE: Called from main thread via DispatchQueue.main.async
     private func onBatchComplete(chunkIndex: Int) {
         batchTrackingLock.lock()
         pendingBatchCount[chunkIndex, default: 1] -= 1
         let remaining = pendingBatchCount[chunkIndex] ?? 0
         let deferredTotal = remaining == 0 ? deferredChunkReady.removeValue(forKey: chunkIndex) : nil
+        let framesExist = pendingOverlayFrames[chunkIndex] != nil && !(pendingOverlayFrames[chunkIndex]?.isEmpty ?? true)
         batchTrackingLock.unlock()
 
         // If all batches done and chunk_ready was deferred, process it now
         if let totalSent = deferredTotal {
-            clientLog("[LIVAClient] ✅ All batches complete for chunk \(chunkIndex), processing deferred chunk_ready")
-            processChunkReady(chunkIndex: chunkIndex, totalSent: totalSent)
+            if framesExist {
+                clientLog("[LIVAClient] ✅ All batches complete for chunk \(chunkIndex), processing deferred chunk_ready")
+                processChunkReady(chunkIndex: chunkIndex, totalSent: totalSent)
+            } else {
+                clientLog("[LIVAClient] ⚠️ Batches complete but NO FRAMES for chunk \(chunkIndex) - this shouldn't happen!")
+            }
         }
     }
 
     private func handleChunkReady(chunkIndex: Int, totalSent: Int) {
-        // PHASE 5: Check if batches are still processing
+        // PHASE 5: Check if batches are still processing + frames exist (single lock)
         batchTrackingLock.lock()
         let pendingCount = pendingBatchCount[chunkIndex, default: 0]
+        let framesExist = pendingOverlayFrames[chunkIndex] != nil && !(pendingOverlayFrames[chunkIndex]?.isEmpty ?? true)
+
         if pendingCount > 0 {
             // Batches still processing - defer chunk_ready
             deferredChunkReady[chunkIndex] = totalSent
@@ -465,82 +605,128 @@ public final class LIVAClient {
             clientLog("[LIVAClient] ⏳ Deferring chunk_ready for chunk \(chunkIndex) - \(pendingCount) batches still processing")
             return
         }
+
+        if !framesExist {
+            // No frames yet - defer chunk_ready
+            deferredChunkReady[chunkIndex] = totalSent
+            batchTrackingLock.unlock()
+            clientLog("[LIVAClient] ⏳ Deferring chunk_ready for chunk \(chunkIndex) - NO FRAMES YET (race condition)")
+            return
+        }
         batchTrackingLock.unlock()
 
-        // All batches done - process chunk_ready
+        // All batches done AND frames exist - process chunk_ready
         processChunkReady(chunkIndex: chunkIndex, totalSent: totalSent)
     }
 
     /// Process chunk ready (extracted for deferred processing)
+    /// NOTE: Must be called from main thread for thread safety with animation engine
     private func processChunkReady(chunkIndex: Int, totalSent: Int) {
-        // Get overlay position from audio event
-        let overlayPosition = pendingOverlayPositions[chunkIndex] ?? .zero
+        // DIAGNOSTICS: Record chunk ready (lightweight, can stay on current thread)
+        LIVAPerformanceTracker.shared.recordChunkReady(chunkIndex: chunkIndex)
+        LIVAPerformanceTracker.shared.logEvent(
+            category: "CHUNK",
+            event: "READY",
+            details: ["chunkIndex": chunkIndex, "totalSent": totalSent]
+        )
 
-        // NEW - Enqueue overlay set in new animation engine
-        if var overlayFrames = pendingOverlayFrames[chunkIndex], !overlayFrames.isEmpty {
-            // Sort by sequence index to ensure correct playback order
-            overlayFrames.sort { $0.sequenceIndex < $1.sequenceIndex }
-
-            // Update coordinates for each frame using the overlay position
-            // Get first frame's image to determine frame size
-            // CONTENT-BASED CACHING: Use overlayId from first frame
-            let firstFrame = overlayFrames[0]
-            let firstKey = getOverlayCacheKey(
-                for: firstFrame,
-                chunkIndex: chunkIndex,
-                sectionIndex: 0,
-                sequenceIndex: 0
-            )
-            var frameSize = CGSize(width: 300, height: 300) // Default size
-            if let firstImage = newAnimationEngine?.getOverlayImage(forKey: firstKey) {
-                frameSize = firstImage.size
-                clientLog("[LIVAClient] 📐 Got overlay frame size: \(frameSize)")
-            } else {
-                clientLog("[LIVAClient] ⚠️ Could not get overlay image for key: \(firstKey)")
-            }
-
-            // Update each frame with proper coordinates
-            var framesWithCoordinates: [OverlayFrame] = []
-            for frame in overlayFrames {
-                let coordinates = CGRect(
-                    x: overlayPosition.x,
-                    y: overlayPosition.y,
-                    width: frameSize.width,
-                    height: frameSize.height
-                )
-                let updatedFrame = OverlayFrame(
-                    matchedSpriteFrameNumber: frame.matchedSpriteFrameNumber,
-                    sheetFilename: frame.sheetFilename,
-                    coordinates: coordinates,
-                    imageData: frame.imageData,
-                    sequenceIndex: frame.sequenceIndex,
-                    animationName: frame.animationName,
-                    originalFrameIndex: frame.originalFrameIndex,
-                    overlayId: frame.overlayId,
-                    char: frame.char,
-                    viseme: frame.viseme
-                )
-                framesWithCoordinates.append(updatedFrame)
-            }
-
-            // Get animation name for this chunk
-            let animationName = chunkAnimationNames[chunkIndex] ?? framesWithCoordinates.first?.animationName ?? "talking_1_s_talking_1_e"
-
-            // Enqueue for playback
-            newAnimationEngine?.enqueueOverlaySet(
-                frames: framesWithCoordinates,
-                chunkIndex: chunkIndex,
-                animationName: animationName,
-                totalFrames: framesWithCoordinates.count
-            )
-
-            clientLog("[LIVAClient] ✅ Enqueued overlay chunk \(chunkIndex) with \(framesWithCoordinates.count) frames, position: \(overlayPosition), animation: \(animationName)")
-        }
-
-        // Clean up stored frames
-        pendingOverlayPositions.removeValue(forKey: chunkIndex)
+        // THREAD SAFETY: Copy data under lock, then release lock before processing
+        batchTrackingLock.lock()
+        let overlayFramesCopy = pendingOverlayFrames[chunkIndex]
+        let animationNameFromDict = chunkAnimationNames[chunkIndex]
+        // Clean up stored frames immediately (under lock)
         pendingOverlayFrames.removeValue(forKey: chunkIndex)
         chunkAnimationNames.removeValue(forKey: chunkIndex)
+        batchTrackingLock.unlock()
+
+        // Get overlay position (accessed from current thread)
+        let overlayPosition = pendingOverlayPositions[chunkIndex] ?? .zero
+        pendingOverlayPositions.removeValue(forKey: chunkIndex)
+
+        // Capture engine reference for background work
+        let engine = newAnimationEngine
+
+        // PERF FIX: Move ALL frame processing to background queue
+        frameProcessingQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            // Process overlay frames in background
+            if var overlayFrames = overlayFramesCopy, !overlayFrames.isEmpty {
+                // Sort by sequence index to ensure correct playback order
+                overlayFrames.sort { $0.sequenceIndex < $1.sequenceIndex }
+
+                // Update coordinates for each frame using the overlay position
+                // Get first frame's image to determine frame size
+                // CONTENT-BASED CACHING: Use overlayId from first frame
+                let firstFrame = overlayFrames[0]
+                let firstKey = getOverlayCacheKey(
+                    for: firstFrame,
+                    chunkIndex: chunkIndex,
+                    sectionIndex: 0,
+                    sequenceIndex: 0
+                )
+                var frameSize = CGSize(width: 300, height: 300) // Default size
+                if let firstImage = engine?.getOverlayImage(forKey: firstKey) {
+                    frameSize = firstImage.size
+                    clientLog("[LIVAClient] 📐 Got overlay frame size: \(frameSize)")
+                } else {
+                    clientLog("[LIVAClient] ⚠️ Could not get overlay image for key: \(firstKey)")
+                }
+
+                // Update each frame with proper coordinates (EXPENSIVE - now in background!)
+                var framesWithCoordinates: [OverlayFrame] = []
+                framesWithCoordinates.reserveCapacity(overlayFrames.count)
+                for frame in overlayFrames {
+                    let coordinates = CGRect(
+                        x: overlayPosition.x,
+                        y: overlayPosition.y,
+                        width: frameSize.width,
+                        height: frameSize.height
+                    )
+                    let updatedFrame = OverlayFrame(
+                        matchedSpriteFrameNumber: frame.matchedSpriteFrameNumber,
+                        sheetFilename: frame.sheetFilename,
+                        coordinates: coordinates,
+                        imageData: frame.imageData,
+                        sequenceIndex: frame.sequenceIndex,
+                        animationName: frame.animationName,
+                        originalFrameIndex: frame.originalFrameIndex,
+                        overlayId: frame.overlayId,
+                        char: frame.char,
+                        viseme: frame.viseme
+                    )
+                    framesWithCoordinates.append(updatedFrame)
+                }
+
+                // Get animation name for this chunk (use copied value from earlier)
+                let animationName = animationNameFromDict ?? framesWithCoordinates.first?.animationName ?? "talking_1_s_talking_1_e"
+
+                // VERBOSE LOGGING: Log what overlayId is set on the frames being enqueued
+                if let firstEnqueuedFrame = framesWithCoordinates.first {
+                    clientLog("[LIVAClient] 📤 ENQUEUE chunk=\(chunkIndex) firstFrame.overlayId='\(firstEnqueuedFrame.overlayId ?? "nil")'")
+                }
+
+                // THREAD SAFETY FIX: Enqueue on main thread to avoid race condition with draw()
+                // The overlayQueue is accessed by both socket callback thread and CADisplayLink thread
+                // Without this, chunks could be lost due to thread-unsafe array operations
+                let framesForEnqueue = framesWithCoordinates
+                let animForEnqueue = animationName
+                let chunkForEnqueue = chunkIndex
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.newAnimationEngine?.enqueueOverlaySet(
+                        frames: framesForEnqueue,
+                        chunkIndex: chunkForEnqueue,
+                        animationName: animForEnqueue,
+                        totalFrames: framesForEnqueue.count
+                    )
+                    clientLog("[LIVAClient] ✅ Enqueued overlay chunk \(chunkForEnqueue) with \(framesForEnqueue.count) frames, position: \(overlayPosition), animation: \(animForEnqueue)")
+                }
+            } else {
+                // DIAGNOSTIC: Log when enqueue is skipped (should not happen after race condition fix)
+                clientLog("[LIVAClient] ❌ SKIPPED ENQUEUE for chunk \(chunkIndex) - (pendingOverlayFrames was nil or empty!)")
+            }
+        }
 
         // PHASE 5: Clean up batch tracking
         batchTrackingLock.lock()
@@ -558,12 +744,14 @@ public final class LIVAClient {
     }
 
     private func handlePlayBaseAnimation(_ animationName: String) {
-        // Handle base/idle animation request
-        // This typically comes after speaking ends
-        newAnimationEngine?.reset()
-        if state == .animating {
-            state = .connected
-        }
+        // FIX: Don't call reset() here - that clears the queue prematurely!
+        // The web frontend sets pendingBaseAtEndRef and lets all chunks play first.
+        // Backend sends play_base_animation BEFORE all chunks finish playing.
+        // We just store the animation name and let the engine transition naturally
+        // when all chunks are done (in animationEngineDidFinishAllChunks).
+        clientLog("[LIVAClient] 📌 Storing pendingBaseAtEnd: \(animationName) (NOT resetting)")
+        pendingBaseAtEnd = animationName
+        // Don't change state or call reset - let animation continue playing
     }
 
     // MARK: - Animation Engine Callbacks (NEW)
@@ -600,7 +788,22 @@ public final class LIVAClient {
     }
 
     private func handleBaseFrameReceived(_ animationName: String, frameIndex: Int, data: Data) {
-        guard let image = UIImage(data: data) else { return }
+        guard let rawImage = UIImage(data: data) else { return }
+
+        // CRITICAL: Force image decompression when receiving base frames
+        // UIImage defers JPEG/PNG decompression until first draw, which
+        // causes freezes during animation. Pre-decode so base frames are
+        // ready to render immediately.
+        let image: UIImage
+        if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
+            image = prepared
+        } else {
+            UIGraphicsBeginImageContextWithOptions(rawImage.size, false, rawImage.scale)
+            rawImage.draw(in: CGRect(origin: .zero, size: rawImage.size))
+            image = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
+            UIGraphicsEndImageContext()
+        }
+
         baseFrameManager?.addFrame(image, animationName: animationName, frameIndex: frameIndex)
     }
 
@@ -621,6 +824,10 @@ public final class LIVAClient {
             )
 
             clientLog("[LIVAClient] ✅ Loaded base animation into new engine: \(animationName), frames: \(frames.count)")
+
+            // Track loaded animation (for readyAnimations communication with backend)
+            loadedAnimationNames.insert(animationName)
+            clientLog("[LIVAClient] 📋 Animation ready: \(animationName) (total ready: \(loadedAnimationNames.count))")
 
             // Start rendering if this is the idle animation
             if animationName == "idle_1_s_idle_1_e" {
@@ -672,15 +879,21 @@ public final class LIVAClient {
         // Get animation name from first section
         let animationName = sectionsArray.first?["animation_name"] as? String ?? "talking_1_s_talking_1_e"
 
-        // Enqueue for playback
-        newAnimationEngine?.enqueueOverlaySet(
-            frames: overlayFrames,
-            chunkIndex: chunkIndex,
-            animationName: animationName,
-            totalFrames: totalFrames
-        )
-
-        clientLog("[LIVAClient] ✅ Enqueued overlay chunk \(chunkIndex), frames: \(overlayFrames.count)")
+        // THREAD SAFETY FIX: Enqueue on main thread to avoid race condition with draw()
+        let framesForEnqueue = overlayFrames
+        let animForEnqueue = animationName
+        let chunkForEnqueue = chunkIndex
+        let totalForEnqueue = totalFrames
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.newAnimationEngine?.enqueueOverlaySet(
+                frames: framesForEnqueue,
+                chunkIndex: chunkForEnqueue,
+                animationName: animForEnqueue,
+                totalFrames: totalForEnqueue
+            )
+            clientLog("[LIVAClient] ✅ Enqueued overlay chunk \(chunkForEnqueue), frames: \(framesForEnqueue.count)")
+        }
     }
 
     // NEW - Handle individual frame image
@@ -719,12 +932,8 @@ public final class LIVAClient {
             // Construct content-based key from available fields
             key = "\(animationName)/\(spriteFrame)/\(sheetFilename)"
         } else {
-            // Fallback to positional key
-            key = getOverlayKey(
-                chunkIndex: chunkIndex,
-                sectionIndex: sectionIndex,
-                sequenceIndex: sequenceIndex
-            )
+            // Fallback to positional key (not recommended - content-based keys preferred)
+            key = "\(chunkIndex)_\(sectionIndex)_\(sequenceIndex)"
         }
 
         newAnimationEngine?.cacheOverlayImage(image, forKey: key, chunkIndex: chunkIndex)
@@ -758,13 +967,24 @@ public final class LIVAClient {
     }
 
     private func loadBaseFramesFromCache() {
+        // Use manifest animation names if available, otherwise fall back to hardcoded priority list
+        // This ensures we load all animations the server provides, not just hardcoded ones
+        let animationsToLoad = manifestAnimationNames.isEmpty ? ANIMATION_LOAD_ORDER : manifestAnimationNames
+
         // Try to load from disk cache
-        for animationName in ANIMATION_LOAD_ORDER {
+        for animationName in animationsToLoad {
             if baseFrameManager?.loadFromCache(animationName: animationName) == true {
+                // Track loaded animation (for readyAnimations communication with backend)
+                loadedAnimationNames.insert(animationName)
+
                 if animationName == "idle_1_s_idle_1_e" {
                     isBaseFramesLoaded = true
                 }
             }
+        }
+
+        if !loadedAnimationNames.isEmpty {
+            clientLog("[LIVAClient] 📋 Loaded \(loadedAnimationNames.count) animations from cache")
         }
     }
 
@@ -777,6 +997,32 @@ public final class LIVAClient {
             pendingConnect = false
             // Continue with connection flow
         }
+    }
+
+    // MARK: - Ready Animations (for backend communication)
+
+    /// Get list of animation names that are fully loaded and ready
+    /// Returns array sorted by priority (ANIMATION_LOAD_ORDER first, then any extras)
+    /// This matches web frontend's getReadyAnimations() behavior
+    private func getReadyAnimations() -> [String] {
+        let prioritySet = Set(ANIMATION_LOAD_ORDER)
+        var ready: [String] = []
+
+        // First: animations from priority list that are loaded (maintains priority order)
+        for name in ANIMATION_LOAD_ORDER {
+            if loadedAnimationNames.contains(name) {
+                ready.append(name)
+            }
+        }
+
+        // Second: any additional loaded animations not in priority list (sorted alphabetically)
+        for name in loadedAnimationNames.sorted() {
+            if !prioritySet.contains(name) {
+                ready.append(name)
+            }
+        }
+
+        return ready
     }
 
     // MARK: - Error Handling
@@ -860,6 +1106,18 @@ public extension LIVAClient {
         case .error: return "error"
         }
     }
+
+    // MARK: - Performance Diagnostics
+
+    /// Print diagnostic report to console
+    func printDiagnosticReport() {
+        LIVAPerformanceTracker.shared.printReport()
+    }
+
+    /// Get performance status string
+    func getPerformanceStatus() -> String {
+        return LIVAPerformanceTracker.shared.getStatus()
+    }
 }
 
 // MARK: - LIVAAnimationEngineDelegate
@@ -875,7 +1133,11 @@ extension LIVAClient: LIVAAnimationEngineDelegate {
 
     /// Called when all overlay chunks have finished playing
     func animationEngineDidFinishAllChunks(_ engine: LIVAAnimationEngine) {
-        clientLog("[LIVAClient] ✅ All overlay chunks complete - transitioning to idle")
+        // Clear pendingBaseAtEnd (like web's pendingBaseAtEndRef.current = null)
+        let wasWaiting = pendingBaseAtEnd != nil
+        pendingBaseAtEnd = nil
+
+        clientLog("[LIVAClient] ✅ All overlay chunks complete - transitioning to idle (pendingBaseWasSet: \(wasWaiting))")
 
         // Update state to connected (not animating anymore)
         if state == .animating {
