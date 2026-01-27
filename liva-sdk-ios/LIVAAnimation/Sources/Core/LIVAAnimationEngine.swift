@@ -134,10 +134,6 @@ class LIVAAnimationEngine {
     private var fpsLastUpdateTime: CFTimeInterval = 0
     private var currentFPS: Double = 0.0
 
-    /// Rolling FPS calculation - stores last N frame times for accurate per-frame FPS
-    private var frameTimeHistory: [CFTimeInterval] = []
-    private let fpsHistorySize: Int = 10  // Use last 10 frames for rolling average
-
     /// Next chunk readiness tracking (prefetch callback system)
     private var nextChunkReady: [Int: Bool] = [:]
 
@@ -368,8 +364,8 @@ class LIVAAnimationEngine {
         audioStartedForChunk.removeAll()
         // Clear prefetch tracking
         nextChunkReady.removeAll()
-        // Clear FPS history for fresh calculation
-        frameTimeHistory.removeAll()
+        // Reset FPS calculation
+        animationFrameCount = 0
         currentFPS = 0.0
 
         animLog("[LIVAAnimationEngine] 🔄 Reset to idle")
@@ -404,8 +400,8 @@ class LIVAAnimationEngine {
 
         // Clear prefetch tracking
         nextChunkReady.removeAll()
-        // Clear FPS history for fresh calculation
-        frameTimeHistory.removeAll()
+        // Reset FPS calculation
+        animationFrameCount = 0
         currentFPS = 0.0
 
         animLog("[LIVAAnimationEngine] 🔄 forceIdleNow - cleared all caches, state, and audio")
@@ -441,23 +437,14 @@ class LIVAAnimationEngine {
             idleFrameAccumulator += deltaTime
         }
 
-        // FPS tracking - ROLLING AVERAGE for real-time accuracy
-        // Store frame delta in history
-        frameTimeHistory.append(deltaTime)
-        if frameTimeHistory.count > fpsHistorySize {
-            frameTimeHistory.removeFirst()
-        }
-
-        // Calculate rolling FPS from recent frame times (only when we have enough data)
-        if frameTimeHistory.count >= 3 {
-            let totalTime = frameTimeHistory.reduce(0, +)
-            let avgFrameTime = totalTime / Double(frameTimeHistory.count)
-            currentFPS = avgFrameTime > 0 ? 1.0 / avgFrameTime : 0.0
-        }
-
-        // Also keep the per-second animation frame count for logging
+        // FPS tracking - Calculate ANIMATION FPS (not render FPS)
+        // We want to show 30fps (animation rate), not 60fps (render rate)
+        // Track time between animation frame advances, not render calls
         let fpsDelta = now - fpsLastUpdateTime
-        if fpsDelta >= 1.0 {
+        if fpsDelta >= 0.5 {  // Update every 0.5 seconds for responsiveness
+            if animationFrameCount > 0 {
+                currentFPS = Double(animationFrameCount) / fpsDelta
+            }
             animationFrameCount = 0
             fpsLastUpdateTime = now
         }
