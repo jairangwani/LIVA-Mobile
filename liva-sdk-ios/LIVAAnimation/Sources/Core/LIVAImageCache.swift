@@ -188,6 +188,12 @@ class LIVAImageCache {
     ///   - chunkIndex: Chunk index for batch eviction
     func setImage(_ image: UIImage, forKey key: String, chunkIndex: Int) {
         setImageInternal(image, forKey: key, chunkIndex: chunkIndex)
+
+        // CRITICAL: Also mark as decoded (UIImage is ready immediately)
+        // This fixes the bug where receive_frame_image path didn't mark as decoded
+        lock.lock()
+        decodedKeys.insert(key)
+        lock.unlock()
     }
 
     /// Internal method to set image (called from both sync and async paths)
