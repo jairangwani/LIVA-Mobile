@@ -63,15 +63,15 @@ final class LIVASocketManager {
         let char: String
         let overlayId: String?  // Content-based cache key from backend
 
-        /// Generate content-based cache key (same format as web)
+        /// Generate content-based cache key (uses unified CacheKeyGenerator)
         /// Format: "{animation_name}/{matched_sprite_frame_number}/{sheet_filename}"
         var contentBasedCacheKey: String {
-            // Use backend's overlay_id if available
-            if let overlayId = overlayId, !overlayId.isEmpty {
-                return overlayId
-            }
-            // Fallback: construct from available fields (matches web format)
-            return "\(animationName)/\(matchedSpriteFrameNumber)/\(sheetFilename)"
+            return CacheKeyGenerator.generate(
+                overlayId: overlayId,
+                animationName: animationName,
+                spriteNumber: matchedSpriteFrameNumber,
+                sheetFilename: sheetFilename
+            )
         }
     }
 

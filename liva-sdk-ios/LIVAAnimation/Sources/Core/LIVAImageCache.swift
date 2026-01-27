@@ -89,9 +89,9 @@ class LIVAImageCache {
         completion: ((Bool) -> Void)? = nil
     ) {
         // Increment pending count for this chunk
-        lock.lock()
-        pendingOperations[chunkIndex, default: 0] += 1
-        lock.unlock()
+        lock.withLock {
+            pendingOperations[chunkIndex, default: 0] += 1
+        }
 
         // Process on background queue (non-blocking!)
         let startTime = CACurrentMediaTime()
@@ -176,11 +176,11 @@ class LIVAImageCache {
 
     /// Decrement pending operations and trigger callback if chunk is complete
     private func decrementPendingAndNotify(chunkIndex: Int) {
-        lock.lock()
-        pendingOperations[chunkIndex, default: 1] -= 1
-        let remaining = pendingOperations[chunkIndex] ?? 0
-        let callback = remaining == 0 ? chunkCompletionCallbacks.removeValue(forKey: chunkIndex) : nil
-        lock.unlock()
+        let callback = lock.withLock { () -> (() -> Void)? in
+            pendingOperations[chunkIndex, default: 1] -= 1
+            let remaining = pendingOperations[chunkIndex] ?? 0
+            return remaining == 0 ? chunkCompletionCallbacks.removeValue(forKey: chunkIndex) : nil
+        }
 
         // Trigger callback on main queue if chunk is complete
         if let callback = callback {
@@ -193,15 +193,18 @@ class LIVAImageCache {
     ///   - chunkIndex: Chunk index to monitor
     ///   - callback: Called when all images for this chunk are cached
     func onChunkComplete(chunkIndex: Int, callback: @escaping () -> Void) {
-        lock.lock()
-        let pending = pendingOperations[chunkIndex, default: 0]
-        if pending == 0 {
-            // Already complete
-            lock.unlock()
+        let isComplete = lock.withLock { () -> Bool in
+            let pending = pendingOperations[chunkIndex, default: 0]
+            if pending == 0 {
+                return true  // Already complete
+            } else {
+                chunkCompletionCallbacks[chunkIndex] = callback
+                return false
+            }
+        }
+
+        if isComplete {
             DispatchQueue.main.async { callback() }
-        } else {
-            chunkCompletionCallbacks[chunkIndex] = callback
-            lock.unlock()
         }
     }
 
@@ -219,9 +222,9 @@ class LIVAImageCache {
         completion: ((Bool) -> Void)? = nil
     ) {
         // Increment pending count for this chunk
-        lock.lock()
-        pendingOperations[chunkIndex, default: 0] += 1
-        lock.unlock()
+        lock.withLock {
+            pendingOperations[chunkIndex, default: 0] += 1
+        }
 
         // Process on background queue (non-blocking!)
         let startTime = CACurrentMediaTime()
@@ -297,41 +300,40 @@ class LIVAImageCache {
 
         // CRITICAL: Also mark as decoded (UIImage is ready immediately)
         // This fixes the bug where receive_frame_image path didn't mark as decoded
-        lock.lock()
-        decodedKeys.insert(key)
-        lock.unlock()
+        lock.withLock {
+            decodedKeys.insert(key)
+        }
     }
 
     /// Internal method to set image (called from both sync and async paths)
     private func setImageInternal(_ image: UIImage, forKey key: String, chunkIndex: Int) {
-        lock.lock()
-        defer { lock.unlock() }
+        lock.withLock {
+            // Check if key already exists (potential overwrite issue)
+            let existingImage = cache.object(forKey: key as NSString)
+            if existingImage != nil {
+                print("[LIVAImageCache] ⚠️ OVERWRITING existing image at key: \(key), chunk: \(chunkIndex)")
+            }
 
-        // Check if key already exists (potential overwrite issue)
-        let existingImage = cache.object(forKey: key as NSString)
-        if existingImage != nil {
-            print("[LIVAImageCache] ⚠️ OVERWRITING existing image at key: \(key), chunk: \(chunkIndex)")
-        }
+            // Track which chunk this image belongs to
+            if chunkImageKeys[chunkIndex] == nil {
+                chunkImageKeys[chunkIndex] = Set()
+            }
+            chunkImageKeys[chunkIndex]?.insert(key)
 
-        // Track which chunk this image belongs to
-        if chunkImageKeys[chunkIndex] == nil {
-            chunkImageKeys[chunkIndex] = Set()
-        }
-        chunkImageKeys[chunkIndex]?.insert(key)
+            // Calculate cost (approximate memory size)
+            // UIImage size = width * height * scale^2 * 4 bytes per pixel (RGBA)
+            let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
 
-        // Calculate cost (approximate memory size)
-        // UIImage size = width * height * scale^2 * 4 bytes per pixel (RGBA)
-        let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
+            cache.setObject(image, forKey: key as NSString, cost: cost)
 
-        cache.setObject(image, forKey: key as NSString, cost: cost)
+            // DIAGNOSTICS: Record cache store
+            LIVAPerformanceTracker.shared.recordFrameCached(key: key, chunk: chunkIndex)
+            let totalImages = chunkImageKeys.values.reduce(0) { $0 + $1.count }
 
-        // DIAGNOSTICS: Record cache store
-        LIVAPerformanceTracker.shared.recordFrameCached(key: key, chunk: chunkIndex)
-        let totalImages = chunkImageKeys.values.reduce(0) { $0 + $1.count }
-
-        // Log first few cached images to debug key format (increased to 20 for better debugging)
-        if totalImages <= 20 {
-            print("[LIVAImageCache] ✅ STORE key='\(key)', chunk=\(chunkIndex), size=\(image.size), total=\(totalImages)")
+            // Log first few cached images to debug key format (increased to 20 for better debugging)
+            if totalImages <= 20 {
+                print("[LIVAImageCache] ✅ STORE key='\(key)', chunk=\(chunkIndex), size=\(image.size), total=\(totalImages)")
+            }
         }
     }
 
@@ -360,97 +362,94 @@ class LIVAImageCache {
     /// - Parameter key: Image key
     /// - Returns: True if image is decoded and ready for rendering
     func isImageDecoded(forKey key: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return decodedKeys.contains(key)
+        return lock.withLock {
+            decodedKeys.contains(key)
+        }
     }
 
     /// Evict all images from specified chunks
     /// - Parameter chunkIndices: Set of chunk indices to evict
     func evictChunks(_ chunkIndices: Set<Int>) {
-        lock.lock()
-        defer { lock.unlock() }
+        lock.withLock {
+            var totalEvicted = 0
 
-        var totalEvicted = 0
+            for chunkIndex in chunkIndices {
+                guard let imageKeys = chunkImageKeys[chunkIndex] else { continue }
 
-        for chunkIndex in chunkIndices {
-            guard let imageKeys = chunkImageKeys[chunkIndex] else { continue }
+                for key in imageKeys {
+                    cache.removeObject(forKey: key as NSString)
+                    decodedKeys.remove(key)  // Also remove from decoded tracking
+                    totalEvicted += 1
+                }
 
-            for key in imageKeys {
-                cache.removeObject(forKey: key as NSString)
-                decodedKeys.remove(key)  // Also remove from decoded tracking
-                totalEvicted += 1
+                chunkImageKeys.removeValue(forKey: chunkIndex)
             }
 
-            chunkImageKeys.removeValue(forKey: chunkIndex)
+            #if DEBUG
+            print("[LIVAImageCache] Evicted \(totalEvicted) images from \(chunkIndices.count) chunks")
+            #endif
         }
-
-        #if DEBUG
-        print("[LIVAImageCache] Evicted \(totalEvicted) images from \(chunkIndices.count) chunks")
-        #endif
     }
 
     /// Clear all cached images
     func clearAll() {
-        lock.lock()
-        defer { lock.unlock() }
+        lock.withLock {
+            cache.removeAllObjects()
+            chunkImageKeys.removeAll()
+            decodedKeys.removeAll()  // Clear decode tracking
 
-        cache.removeAllObjects()
-        chunkImageKeys.removeAll()
-        decodedKeys.removeAll()  // Clear decode tracking
-
-        #if DEBUG
-        print("[LIVAImageCache] Cleared all cached images")
-        #endif
+            #if DEBUG
+            print("[LIVAImageCache] Cleared all cached images")
+            #endif
+        }
     }
 
     /// Get cache statistics
     /// - Returns: Dictionary with cache stats
     func getStats() -> [String: Any] {
-        lock.lock()
-        defer { lock.unlock() }
+        return lock.withLock {
+            let totalImages = chunkImageKeys.values.reduce(0) { $0 + $1.count }
+            let totalChunks = chunkImageKeys.count
 
-        let totalImages = chunkImageKeys.values.reduce(0) { $0 + $1.count }
-        let totalChunks = chunkImageKeys.count
-
-        return [
-            "totalImages": totalImages,
-            "totalChunks": totalChunks,
-            "countLimit": cache.countLimit,
-            "totalCostLimit": cache.totalCostLimit
-        ]
+            return [
+                "totalImages": totalImages,
+                "totalChunks": totalChunks,
+                "countLimit": cache.countLimit,
+                "totalCostLimit": cache.totalCostLimit
+            ]
+        }
     }
 
     /// Get total number of cached images
     var count: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return chunkImageKeys.values.reduce(0) { $0 + $1.count }
+        return lock.withLock {
+            chunkImageKeys.values.reduce(0) { $0 + $1.count }
+        }
     }
 
     /// Get all cached keys for a chunk
     func keysForChunk(_ chunkIndex: Int) -> [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return Array(chunkImageKeys[chunkIndex] ?? [])
+        return lock.withLock {
+            Array(chunkImageKeys[chunkIndex] ?? [])
+        }
     }
 
     /// Get count of images per chunk (for diagnostics)
     func getChunkCounts() -> [Int: Int] {
-        lock.lock()
-        defer { lock.unlock() }
-        var counts: [Int: Int] = [:]
-        for (chunk, keys) in chunkImageKeys {
-            counts[chunk] = keys.count
+        return lock.withLock {
+            var counts: [Int: Int] = [:]
+            for (chunk, keys) in chunkImageKeys {
+                counts[chunk] = keys.count
+            }
+            return counts
         }
-        return counts
     }
 
     /// Get count of decoded images (for diagnostics)
     var decodedCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return decodedKeys.count
+        return lock.withLock {
+            decodedKeys.count
+        }
     }
 
     // MARK: - Private Methods

@@ -402,71 +402,17 @@ public class LIVACanvasView: UIView {
         }
     }
 
-    // MARK: - Display Link
+    // MARK: - Display Link (Legacy - No Longer Used)
 
-    /// Start the render loop
+    /// Legacy render loop - no longer used (LIVAAnimationEngine handles rendering directly)
+    /// Kept as no-op for backward compatibility
     func startRenderLoop() {
-        guard displayLink == nil else { return }
-
-        isRendering = true
-        displayLink = CADisplayLink(target: self, selector: #selector(legacyRenderFrame))
-
-        // Request 60fps but the animation engine controls actual frame rate
-        if #available(iOS 15.0, *) {
-            displayLink?.preferredFrameRateRange = CAFrameRateRange(
-                minimum: 30,
-                maximum: 60,
-                preferred: 60
-            )
-        } else {
-            displayLink?.preferredFramesPerSecond = 60
-        }
-
-        displayLink?.add(to: .main, forMode: .common)
-        lastFPSTime = CACurrentMediaTime()
+        // No-op: New animation engine (LIVAAnimationEngine) handles rendering
     }
 
-    /// Stop the render loop
+    /// Stop legacy render loop - no-op since loop is never started
     func stopRenderLoop() {
-        isRendering = false
-        displayLink?.invalidate()
-        displayLink = nil
-    }
-
-    @objc private func legacyRenderFrame(_ displayLink: CADisplayLink) {
-        // Update FPS counter
-        frameCount += 1
-        let currentTime = CACurrentMediaTime()
-        if currentTime - lastFPSTime >= 1.0 {
-            currentFPS = Double(frameCount) / (currentTime - lastFPSTime)
-            frameCount = 0
-            lastFPSTime = currentTime
-        }
-
-        // Get next frame from animation engine (legacy)
-        guard let engine = animationEngine,
-              let frame = engine.getNextFrame() else {
-            return
-        }
-
-        // Update frames (legacy single overlay)
-        baseFrame = frame.baseImage
-        let legacyOverlayImage = frame.overlayImage
-        let legacyOverlayPosition = frame.overlayPosition
-
-        // Convert to new format
-        if let overlay = legacyOverlayImage {
-            overlayFrames = [(overlay, CGRect(origin: legacyOverlayPosition, size: overlay.size))]
-        } else {
-            overlayFrames = []
-        }
-
-        // Render
-        if useLayerRendering {
-            renderWithLayers()
-        } else {
-            setNeedsDisplay()
-        }
+        // No-op: New animation engine handles rendering, no display link to stop
     }
 
     // MARK: - Cleanup

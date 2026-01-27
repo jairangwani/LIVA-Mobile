@@ -960,9 +960,7 @@ public final class LIVAClient {
 
         baseFrameManager?.onFirstIdleFrameReady = { [weak self] in
             // First idle frame received - can start showing avatar
-            self?.canvasView?.setBaseFrameManager(self?.baseFrameManager)
-            // NOTE: Don't start legacy canvas render loop - new animation engine handles rendering
-            // self?.canvasView?.startRenderLoop()
+            // NOTE: Animation engine handles rendering, no setup needed here
         }
     }
 

@@ -148,22 +148,47 @@ extension Array {
     }
 }
 
+// MARK: - Lock Utilities
+
+extension NSLock {
+    /// Execute block with lock held, guaranteed unlock via defer
+    /// - Parameter block: Code to execute while holding the lock
+    /// - Returns: Return value from the block
+    /// - Throws: Rethrows any error from the block
+    ///
+    /// **Usage:**
+    /// ```swift
+    /// let value = myLock.withLock {
+    ///     return protectedData
+    /// }
+    /// ```
+    ///
+    /// **Thread Safety:** Always releases lock even if block throws
+    func withLock<T>(_ block: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try block()
+    }
+}
+
 // MARK: - Cache Key Helper
 
-/// Generate cache key for overlay frame - PREFERS overlayId (content-based) over positional key
+/// Generate cache key for overlay frame (uses unified CacheKeyGenerator)
 /// - Parameters:
-///   - frame: The overlay frame containing overlayId
+///   - frame: The overlay frame containing overlayId and animation data
 ///   - chunkIndex: Chunk index (fallback only)
 ///   - sectionIndex: Section index (fallback only)
 ///   - sequenceIndex: Sequence index (fallback only)
-/// - Returns: Cache key string (overlayId if available, else "chunk_section_sequence")
+/// - Returns: Cache key string (content-based if available, else positional)
 func getOverlayCacheKey(for frame: OverlayFrame, chunkIndex: Int, sectionIndex: Int, sequenceIndex: Int) -> String {
-    // CONTENT-BASED CACHING: Use overlayId when available (matches web behavior)
-    // This prevents wrong images if cache isn't cleared between messages
-    if let overlayId = frame.overlayId, !overlayId.isEmpty {
-        return overlayId
-    }
-    // Fallback to positional key
-    return "\(chunkIndex)_\(sectionIndex)_\(sequenceIndex)"
+    return CacheKeyGenerator.generate(
+        overlayId: frame.overlayId,
+        animationName: frame.animationName,
+        spriteNumber: frame.matchedSpriteFrameNumber,
+        sheetFilename: frame.sheetFilename,
+        fallbackChunk: chunkIndex,
+        fallbackSection: sectionIndex,
+        fallbackSequence: sequenceIndex
+    )
 }
 
