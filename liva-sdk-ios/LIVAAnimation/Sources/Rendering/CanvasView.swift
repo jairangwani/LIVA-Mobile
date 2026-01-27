@@ -398,7 +398,7 @@ public class LIVACanvasView: UIView {
         let elapsed = CACurrentMediaTime() - start
         // Log slow renders (> 5ms)
         if elapsed > 0.005 {
-            livaLog("[CanvasView] ⏱️ Slow render: \(String(format: "%.2f", elapsed * 1000))ms, overlays=\(overlays.count)")
+            print("[CanvasView] ⏱️ Slow render: \(String(format: "%.2f", elapsed * 1000))ms, overlays=\(overlays.count)")
         }
     }
 

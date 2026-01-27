@@ -58,6 +58,11 @@ public final class LIVAClient {
         return socketManager?.isConnected ?? false
     }
 
+    /// Whether the client can send messages (connected AND idle animation loaded)
+    public var canSendMessages: Bool {
+        return isReadyForInteraction && state == .connected
+    }
+
     // MARK: - Callbacks
 
     /// Called when connection state changes
@@ -65,6 +70,10 @@ public final class LIVAClient {
 
     /// Called when an error occurs
     public var onError: ((LIVAError) -> Void)?
+
+    /// Called when ready state changes (can send messages)
+    /// This allows UI to enable message input as soon as idle animation loads
+    public var onReadyStateChange: ((Bool) -> Void)?
 
     // MARK: - Components
 
@@ -78,6 +87,10 @@ public final class LIVAClient {
 
     private var isBaseFramesLoaded: Bool = false
     private var pendingConnect: Bool = false
+
+    /// Track whether UI can send messages (unlocks when idle animation loads)
+    /// This enables instant start - user can send messages as soon as idle is ready
+    private var isReadyForInteraction: Bool = false
 
     // MARK: - State Tracking
 
@@ -121,6 +134,9 @@ public final class LIVAClient {
     /// Used to tell backend which animations are available (matches web's getReadyAnimations)
     private var loadedAnimationNames: Set<String> = []
 
+    /// Track app startup time for performance logging
+    private var appStartTime: Date = Date()
+
     // MARK: - Public Methods
 
     /// Configure the SDK with connection parameters
@@ -157,6 +173,9 @@ public final class LIVAClient {
         newAnimationEngine?.delegate = self  // Set delegate for audio-animation sync
 
         clientLog("[LIVAClient] ✅ Attached canvas view and initialized new animation engine with audio sync")
+
+        // CRITICAL: Load any cached animations into the engine
+        loadCachedAnimationsIntoEngine()
     }
 
     /// DEBUG: Disable overlay rendering to test base frames + audio only
@@ -187,8 +206,29 @@ public final class LIVAClient {
         return getReadyAnimations()
     }
 
+    /// Send a message to the backend
+    /// Automatically includes the list of currently loaded animations so backend can adapt its response
+    /// - Parameter message: User's message text
+    public func sendMessage(_ message: String) {
+        guard socketManager?.isConnected == true else {
+            clientLog("[LIVAClient] ⚠️ Cannot send message - not connected")
+            return
+        }
+
+        // Get currently loaded animations
+        let readyAnimations = getReadyAnimations()
+
+        clientLog("[LIVAClient] 📤 Sending message with \(readyAnimations.count) ready animations: \(readyAnimations.prefix(3))...")
+
+        // Send with animation state
+        socketManager?.sendMessage(message, readyAnimations: readyAnimations)
+    }
+
     /// Connect to the backend server
     public func connect() {
+        let startTime = Date()
+        print("⏱️ [APP START] \(Date()) - Connecting to backend...")
+
         guard let config = configuration else {
             handleError(.notConfigured)
             return
@@ -203,6 +243,8 @@ public final class LIVAClient {
         socketManager = LIVASocketManager(configuration: config)
         setupSocketCallbacks()
         socketManager?.connect()
+
+        print("⏱️ [APP START] Socket connection initiated (+\(String(format: "%.2f", Date().timeIntervalSince(startTime)))s)")
     }
 
     /// Disconnect from the server
@@ -262,25 +304,31 @@ public final class LIVAClient {
         guard let socket = socketManager else { return }
 
         socket.onConnect = { [weak self] in
-            self?.state = .connected
+            guard let self = self else { return }
+            let elapsed = Date().timeIntervalSince(self.appStartTime)
+            print("⏱️ [SOCKET CONNECTED] +\(String(format: "%.2f", elapsed))s - Backend connected!")
+
+            self.state = .connected
             // NOTE: Don't start legacy canvas render loop - new animation engine handles rendering
-            // self?.canvasView?.startRenderLoop()
+            // self.canvasView?.startRenderLoop()
 
             // Start session logging to LIVA-TESTS/logs/sessions/
-            let userId = self?.configuration?.userId ?? ""
-            let agentId = self?.configuration?.agentId ?? ""
+            let userId = self.configuration?.userId ?? ""
+            let agentId = self.configuration?.agentId ?? ""
             LIVASessionLogger.shared.startSession(userId: userId, agentId: agentId) { sessionId in
                 if let sessionId = sessionId {
                     clientLog("[LIVAClient] 📊 Started logging session: \(sessionId)")
                     // Tell backend to log frames to same session (enables backend vs iOS comparison)
-                    self?.socketManager?.setSessionId(sessionId)
+                    self.socketManager?.setSessionId(sessionId)
                 }
             }
 
             // Request animations manifest to start loading base frames
-            if let agentId = self?.configuration?.agentId {
+            if let agentId = self.configuration?.agentId {
+                let elapsed = Date().timeIntervalSince(self.appStartTime)
+                print("⏱️ [REQUESTING MANIFEST] +\(String(format: "%.2f", elapsed))s - Asking backend for animations list...")
                 clientLog("[LIVAClient] 📤 Requesting animations manifest after connect")
-                self?.socketManager?.requestAnimationsManifest(agentId: agentId)
+                self.socketManager?.requestAnimationsManifest(agentId: agentId)
             }
         }
 
@@ -353,7 +401,9 @@ public final class LIVAClient {
     private func handleAnimationsManifest(_ animations: [String: Any]) {
         guard let config = configuration else { return }
 
+        let elapsed = Date().timeIntervalSince(appStartTime)
         let animationNamesSet = Set(animations.keys)
+        print("⏱️ [MANIFEST RECEIVED] +\(String(format: "%.2f", elapsed))s - Got \(animationNamesSet.count) animations from backend")
         clientLog("[LIVAClient] 📋 Received manifest with \(animationNamesSet.count) animations")
 
         // Build prioritized list: animations in ANIMATION_LOAD_ORDER first (in order),
@@ -380,11 +430,48 @@ public final class LIVAClient {
         manifestAnimationNames = orderedAnimations
         clientLog("[LIVAClient] 📋 Will load \(orderedAnimations.count) animations in priority order")
 
-        // Request ALL animations from manifest in priority order
-        for animationName in orderedAnimations {
-            clientLog("[LIVAClient] 📤 Requesting animation: \(animationName)")
-            socketManager?.requestBaseAnimation(name: animationName, agentId: config.agentId)
+        // INSTANT START: Load idle FIRST before anything else
+        let idleAnimation = "idle_1_s_idle_1_e"
+        if orderedAnimations.contains(idleAnimation) {
+            let elapsed = Date().timeIntervalSince(appStartTime)
+            print("⏱️ [LOADING IDLE] +\(String(format: "%.2f", elapsed))s - Loading idle animation (top priority)...")
+            clientLog("[LIVAClient] ⚡ Loading IDLE first for instant start")
+            socketManager?.requestBaseAnimation(name: idleAnimation, agentId: config.agentId)
+
+            // Wait 100ms then start loading others in background
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.loadRemainingAnimations(orderedAnimations, excluding: idleAnimation)
+            }
+        } else {
+            // Fallback: load all in order if idle not found
+            loadRemainingAnimations(orderedAnimations, excluding: nil)
         }
+    }
+
+    /// Load remaining animations in background (after idle loads first)
+    /// - Parameters:
+    ///   - animations: Full list of animations to load
+    ///   - excluding: Animation to skip (already loaded)
+    private func loadRemainingAnimations(_ animations: [String], excluding: String?) {
+        guard let config = configuration else { return }
+
+        let elapsed = Date().timeIntervalSince(appStartTime)
+        let remainingCount = animations.filter { $0 != excluding }.count
+        print("⏱️ [BACKGROUND LOADING] +\(String(format: "%.2f", elapsed))s - Loading \(remainingCount) remaining animations in background...")
+
+        for animationName in animations {
+            if animationName == excluding { continue }
+
+            clientLog("[LIVAClient] 📤 Requesting animation (background): \(animationName)")
+            socketManager?.requestBaseAnimation(name: animationName, agentId: config.agentId)
+
+            // Small delay between requests to avoid overwhelming server
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        let elapsed2 = Date().timeIntervalSince(appStartTime)
+        print("⏱️ [BACKGROUND REQUESTS SENT] +\(String(format: "%.2f", elapsed2))s - All \(remainingCount) background animation requests sent")
+        clientLog("[LIVAClient] ✅ Finished requesting all background animations")
     }
 
     // MARK: - Event Handlers
@@ -789,6 +876,8 @@ public final class LIVAClient {
     // MARK: - Base Frame Event Handlers
 
     private func handleAnimationTotalFrames(_ animationName: String, totalFrames: Int) {
+        let elapsed = Date().timeIntervalSince(appStartTime)
+        print("⏱️ [ANIMATION START] +\(String(format: "%.2f", elapsed))s - Downloading \(animationName) (\(totalFrames) frames)...")
         baseFrameManager?.registerAnimation(name: animationName, totalFrames: totalFrames)
     }
 
@@ -824,10 +913,27 @@ public final class LIVAClient {
 
             // Track loaded animation (for readyAnimations communication with backend)
             loadedAnimationNames.insert(animationName)
+            let elapsed = Date().timeIntervalSince(appStartTime)
+            print("⏱️ [ANIMATION READY] +\(String(format: "%.2f", elapsed))s - \(animationName) loaded (\(loadedAnimationNames.count) total)")
             clientLog("[LIVAClient] 📋 Animation ready: \(animationName) (total ready: \(loadedAnimationNames.count))")
+
+            // INSTANT START: Unlock UI as soon as idle is ready
+            if animationName == "idle_1_s_idle_1_e" && !isReadyForInteraction {
+                isReadyForInteraction = true
+                let elapsed = Date().timeIntervalSince(appStartTime)
+                print("🎉🎉🎉 [UI READY] +\(String(format: "%.2f", elapsed))s - IDLE LOADED! User can now send messages! 🎉🎉🎉")
+                clientLog("[LIVAClient] 🎉 READY FOR INTERACTION (idle loaded)")
+
+                // Notify Flutter/UI that messages can now be sent
+                DispatchQueue.main.async { [weak self] in
+                    self?.onReadyStateChange?(true)
+                }
+            }
 
             // Start rendering if this is the idle animation
             if animationName == "idle_1_s_idle_1_e" {
+                let elapsed = Date().timeIntervalSince(appStartTime)
+                print("⏱️ [RENDERING STARTED] +\(String(format: "%.2f", elapsed))s - Animation engine rendering idle loop")
                 newAnimationEngine?.startRendering()
                 clientLog("[LIVAClient] ▶️ Started new animation engine rendering")
             }
@@ -962,24 +1068,114 @@ public final class LIVAClient {
     }
 
     private func loadBaseFramesFromCache() {
+        let loadStart = Date()
+
+        // Show cache statistics
+        if let stats = baseFrameManager?.getCacheStats() {
+            print("💾 [CACHE] Size: \(String(format: "%.1f", stats.sizeMB))MB, Animations: \(stats.animations)")
+        }
+
         // Use manifest animation names if available, otherwise fall back to hardcoded priority list
         // This ensures we load all animations the server provides, not just hardcoded ones
         let animationsToLoad = manifestAnimationNames.isEmpty ? ANIMATION_LOAD_ORDER : manifestAnimationNames
 
+        var cacheHits = 0
+        var cacheMisses = 0
+
         // Try to load from disk cache
         for animationName in animationsToLoad {
             if baseFrameManager?.loadFromCache(animationName: animationName) == true {
+                cacheHits += 1
+                let elapsed = Date().timeIntervalSince(appStartTime)
+                print("⏱️ [CACHE HIT] +\(String(format: "%.2f", elapsed))s - Loaded \(animationName) from cache")
+
                 // Track loaded animation (for readyAnimations communication with backend)
                 loadedAnimationNames.insert(animationName)
 
                 if animationName == "idle_1_s_idle_1_e" {
                     isBaseFramesLoaded = true
                 }
+            } else {
+                cacheMisses += 1
             }
+        }
+
+        let loadTime = Date().timeIntervalSince(loadStart)
+        if cacheHits > 0 {
+            print("✅ [CACHE] Loaded \(cacheHits) animations from cache in \(String(format: "%.2f", loadTime))s (\(cacheMisses) need download)")
+        } else {
+            print("⚠️ [CACHE] No cached animations - first run, will download all")
         }
 
         if !loadedAnimationNames.isEmpty {
             clientLog("[LIVAClient] 📋 Loaded \(loadedAnimationNames.count) animations from cache")
+        }
+    }
+
+    /// Load cached animations into the animation engine (called after engine is created)
+    private func loadCachedAnimationsIntoEngine() {
+        guard newAnimationEngine != nil else { return }
+
+        let elapsed = Date().timeIntervalSince(appStartTime)
+        print("⏱️ [CACHE→ENGINE] +\(String(format: "%.2f", elapsed))s - Loading cached animations into engine...")
+
+        // CRITICAL: Load idle FIRST and start rendering immediately
+        // Load other animations in background to avoid blocking
+        let idleAnimation = "idle_1_s_idle_1_e"
+
+        if loadedAnimationNames.contains(idleAnimation),
+           let frames = baseFrameManager?.getFrames(for: idleAnimation), !frames.isEmpty {
+
+            let expectedCount = baseFrameManager?.getTotalFrames(for: idleAnimation) ?? frames.count
+            newAnimationEngine?.loadBaseAnimation(
+                name: idleAnimation,
+                frames: frames,
+                expectedCount: expectedCount
+            )
+
+            let elapsed = Date().timeIntervalSince(appStartTime)
+            print("🎉🎉🎉 [UI READY FROM CACHE] +\(String(format: "%.2f", elapsed))s - IDLE from cache! Starting rendering...")
+
+            // Start rendering IMMEDIATELY - don't wait for other animations
+            newAnimationEngine?.startRendering()
+
+            // Unlock UI
+            if !isReadyForInteraction {
+                isReadyForInteraction = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.onReadyStateChange?(true)
+                }
+            }
+        }
+
+        // Load remaining animations in background (don't block render thread!)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+
+            var loadedCount = 1 // Already loaded idle
+            for animationName in self.loadedAnimationNames {
+                if animationName == idleAnimation { continue } // Skip idle, already loaded
+
+                if let frames = self.baseFrameManager?.getFrames(for: animationName), !frames.isEmpty {
+                    let expectedCount = self.baseFrameManager?.getTotalFrames(for: animationName) ?? frames.count
+
+                    DispatchQueue.main.async {
+                        self.newAnimationEngine?.loadBaseAnimation(
+                            name: animationName,
+                            frames: frames,
+                            expectedCount: expectedCount
+                        )
+                    }
+
+                    loadedCount += 1
+
+                    // Small delay between loads to avoid CPU spike
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+            }
+
+            let elapsed2 = Date().timeIntervalSince(self.appStartTime)
+            print("✅ [CACHE→ENGINE] +\(String(format: "%.2f", elapsed2))s - Loaded \(loadedCount) cached animations into engine (background)")
         }
     }
 

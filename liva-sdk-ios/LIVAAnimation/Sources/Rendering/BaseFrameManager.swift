@@ -105,6 +105,9 @@ final class BaseFrameManager {
     /// Cache directory for persistent storage
     private let cacheDirectory: URL?
 
+    /// Maximum cache size in bytes (500 MB)
+    private let maxCacheSize: Int = 500 * 1024 * 1024
+
     // MARK: - Callbacks
 
     var onAnimationLoaded: ((String) -> Void)?
@@ -118,6 +121,7 @@ final class BaseFrameManager {
         if let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
             cacheDirectory = cacheDir.appendingPathComponent("LIVABaseFrames", isDirectory: true)
             createCacheDirectoryIfNeeded()
+            manageCacheSize()
         } else {
             cacheDirectory = nil
         }
@@ -301,12 +305,17 @@ final class BaseFrameManager {
             return
         }
         let frames = animation.frames
+        let frameCount = frames.count
         animationLock.unlock()
 
-        DispatchQueue.global(qos: .background).async {
+        print("💾 [CACHE] Saving \(name) to disk (\(frameCount) frames)...")
+
+        DispatchQueue.global(qos: .background).async { [weak self] in
+            let startTime = Date()
             let animationDir = cacheDir.appendingPathComponent(name, isDirectory: true)
             try? FileManager.default.createDirectory(at: animationDir, withIntermediateDirectories: true)
 
+            var savedCount = 0
             for (index, frame) in frames.enumerated() {
                 guard frame.size.width > 0,
                       let data = frame.pngData() else { continue }
@@ -314,6 +323,15 @@ final class BaseFrameManager {
                 let fileName = String(format: "frame_%04d.png", index)
                 let fileURL = animationDir.appendingPathComponent(fileName)
                 try? data.write(to: fileURL)
+                savedCount += 1
+            }
+
+            let elapsed = Date().timeIntervalSince(startTime)
+            print("✅ [CACHE] Saved \(name) (\(savedCount) frames) in \(String(format: "%.2f", elapsed))s")
+
+            // Show updated cache stats
+            if let stats = self?.getCacheStats() {
+                print("💾 [CACHE] Total: \(String(format: "%.1f", stats.sizeMB))MB, \(stats.animations) animations")
             }
         }
     }
@@ -355,6 +373,75 @@ final class BaseFrameManager {
         return isAnimationLoaded(animationName)
     }
 
+    /// Get total cache size in bytes
+    func getCacheSize() -> Int64 {
+        guard let cacheDir = cacheDirectory else { return 0 }
+
+        var totalSize: Int64 = 0
+        if let enumerator = FileManager.default.enumerator(at: cacheDir, includingPropertiesForKeys: [.fileSizeKey]) {
+            for case let fileURL as URL in enumerator {
+                if let fileSize = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                    totalSize += Int64(fileSize)
+                }
+            }
+        }
+        return totalSize
+    }
+
+    /// Manage cache size - delete oldest animations if over 500MB
+    private func manageCacheSize() {
+        guard let cacheDir = cacheDirectory else { return }
+
+        let currentSize = getCacheSize()
+        let maxSize = Int64(maxCacheSize)
+
+        if currentSize > maxSize {
+            let sizeMB = Double(currentSize) / (1024 * 1024)
+            print("⚠️ [CACHE] Cache size \(String(format: "%.1f", sizeMB))MB exceeds 500MB limit, cleaning up...")
+
+            // Get all animation directories with modification dates
+            var animationDirs: [(url: URL, date: Date)] = []
+            if let contents = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
+                for url in contents where url.hasDirectoryPath {
+                    if let date = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+                        animationDirs.append((url, date))
+                    }
+                }
+            }
+
+            // Sort by date (oldest first)
+            animationDirs.sort { $0.date < $1.date }
+
+            // Delete oldest until under limit
+            var deletedCount = 0
+            for (url, _) in animationDirs {
+                try? FileManager.default.removeItem(at: url)
+                deletedCount += 1
+
+                let newSize = getCacheSize()
+                if newSize < maxSize {
+                    print("✅ [CACHE] Deleted \(deletedCount) old animations, cache now \(String(format: "%.1f", Double(newSize) / (1024 * 1024)))MB")
+                    break
+                }
+            }
+        }
+    }
+
+    /// Get cache statistics
+    func getCacheStats() -> (size: Int64, animations: Int, sizeMB: Double) {
+        guard let cacheDir = cacheDirectory else { return (0, 0, 0) }
+
+        let size = getCacheSize()
+        let sizeMB = Double(size) / (1024 * 1024)
+
+        var animationCount = 0
+        if let contents = try? FileManager.default.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) {
+            animationCount = contents.filter { $0.hasDirectoryPath }.count
+        }
+
+        return (size, animationCount, sizeMB)
+    }
+
     /// Clear all cached frames
     func clearCache() {
         guard let cacheDir = cacheDirectory else { return }
@@ -367,6 +454,8 @@ final class BaseFrameManager {
         loadedAnimations.removeAll()
         currentFrameIndex = 0
         animationLock.unlock()
+
+        print("🗑️ [CACHE] Cleared all cached animations")
     }
 
     // MARK: - Debug

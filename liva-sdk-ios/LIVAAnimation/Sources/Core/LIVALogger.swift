@@ -11,7 +11,7 @@
 import os.log
 
 /// Log categories for different subsystems
-enum LIVALogCategory: String {
+public enum LIVALogCategory: String {
     case client = "Client"
     case animation = "Animation"
     case socket = "Socket"
@@ -51,6 +51,6 @@ class LIVALogger {
 ///   - message: Message to log
 ///   - category: Log category (default: .client)
 ///   - type: Log type (default: .debug)
-func livaLog(_ message: String, category: LIVALogCategory = .client, type: OSLogType = .debug) {
+public func livaLog(_ message: String, category: LIVALogCategory = .client, type: OSLogType = .debug) {
     LIVALogger.shared.log(message, category: category, type: type)
 }

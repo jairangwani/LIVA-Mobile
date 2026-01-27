@@ -75,7 +75,7 @@ public final class LIVASessionLogger {
             }
 
             self?.sessionId = sessionId
-            livaLog("[LIVASessionLogger] Started session: \(sessionId)", category: .client)
+            print("[LIVASessionLogger] Started session: \(sessionId)")
             completion?(sessionId)
         }
     }
@@ -147,7 +147,7 @@ public final class LIVASessionLogger {
         ]
 
         postJSON(endpoint: "/api/log/session/end", payload: payload) { [weak self] _ in
-            livaLog("[LIVASessionLogger] Ended session: \(sessionId)", category: .client)
+            print("[LIVASessionLogger] Ended session: \(sessionId)")
             self?.sessionId = nil
             completion?()
         }
@@ -188,7 +188,7 @@ public final class LIVASessionLogger {
                 if let error = error {
                     // Silently ignore errors - logging should not affect app functionality
                     #if DEBUG
-                    livaLog("[LIVASessionLogger] HTTP error: \(error.localizedDescription)", category: .client)
+                    print("[LIVASessionLogger] HTTP error: \(error.localizedDescription)")
                     #endif
                 }
                 completion?(data)

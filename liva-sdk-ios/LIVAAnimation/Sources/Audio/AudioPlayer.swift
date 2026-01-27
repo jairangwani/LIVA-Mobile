@@ -206,7 +206,7 @@ final class AudioPlayer: NSObject {
 
             let decodeTime = (CACurrentMediaTime() - decodeStart) * 1000
             if decodeTime > 10 {
-                livaLog("[AudioPlayer] ⏱️ Audio decode: \(String(format: "%.1f", decodeTime))ms (chunk \(chunk.chunkIndex))")
+                print("[AudioPlayer] ⏱️ Audio decode: \(String(format: "%.1f", decodeTime))ms (chunk \(chunk.chunkIndex))")
             }
 
             // MAIN THREAD: Schedule buffer with AVAudioPlayerNode

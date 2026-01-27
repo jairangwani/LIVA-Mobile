@@ -322,6 +322,25 @@ final class LIVASocketManager {
         socket.emit("set_session_id", ["session_id": sessionId])
     }
 
+    /// Send user message to backend with currently loaded animations
+    /// - Parameters:
+    ///   - message: User's message text
+    ///   - readyAnimations: List of animations currently loaded and ready for use
+    func sendMessage(_ message: String, readyAnimations: [String] = []) {
+        guard let socket = socket, socket.status == .connected else {
+            socketLog("[LIVASocketManager] Cannot send message - not connected")
+            return
+        }
+
+        socketLog("[LIVASocketManager] 📤 Sending message with \(readyAnimations.count) ready animations")
+        socketLog("[LIVASocketManager] Ready animations: \(readyAnimations.prefix(3))...")
+
+        socket.emit("user_message", [
+            "message": message,
+            "ready_animations": readyAnimations  // Tell backend what's loaded
+        ])
+    }
+
     // MARK: - Event Parsing
 
     private func handleAudioEvent(_ data: [Any]) {

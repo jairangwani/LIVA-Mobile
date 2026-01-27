@@ -129,7 +129,7 @@ class LIVAImageCache {
 
             // Log slow processing (> 10ms)
             if totalTime > 0.010 {
-                livaLog("[LIVAImageCache] ⏱️ Slow async process: key=\(key) total=\(String(format: "%.1f", totalTime * 1000))ms (base64=\(String(format: "%.1f", base64Time * 1000))ms, image=\(String(format: "%.1f", imageTime * 1000))ms, forceDecode=\(String(format: "%.1f", forceDecodeTime * 1000))ms)", category: .cache)
+                print("[LIVAImageCache] ⏱️ Slow async process: key=\(key) total=\(String(format: "%.1f", totalTime * 1000))ms (base64=\(String(format: "%.1f", base64Time * 1000))ms, image=\(String(format: "%.1f", imageTime * 1000))ms, forceDecode=\(String(format: "%.1f", forceDecodeTime * 1000))ms)")
             }
 
             // Store in cache (fast - minimal lock time)
@@ -235,7 +235,7 @@ class LIVAImageCache {
 
             // Log slow processing (> 10ms)
             if totalTime > 0.010 {
-                livaLog("[LIVAImageCache] ⏱️ Slow async process (raw): key=\(key) total=\(String(format: "%.1f", totalTime * 1000))ms (image=\(String(format: "%.1f", imageTime * 1000))ms, forceDecode=\(String(format: "%.1f", forceDecodeTime * 1000))ms)")
+                print("[LIVAImageCache] ⏱️ Slow async process (raw): key=\(key) total=\(String(format: "%.1f", totalTime * 1000))ms (image=\(String(format: "%.1f", imageTime * 1000))ms, forceDecode=\(String(format: "%.1f", forceDecodeTime * 1000))ms)")
             }
 
             // Store in cache (fast - minimal lock time)
@@ -282,7 +282,7 @@ class LIVAImageCache {
             // Check if key already exists (potential overwrite issue)
             let existingImage = cache.object(forKey: key as NSString)
             if existingImage != nil {
-                livaLog("[LIVAImageCache] ⚠️ OVERWRITING existing image at key: \(key), chunk: \(chunkIndex)", category: .cache)
+                print("[LIVAImageCache] ⚠️ OVERWRITING existing image at key: \(key), chunk: \(chunkIndex)")
             }
 
             // Track which chunk this image belongs to
@@ -303,7 +303,7 @@ class LIVAImageCache {
 
             // Log first few cached images to debug key format (increased to 20 for better debugging)
             if totalImages <= 20 {
-                livaLog("[LIVAImageCache] ✅ STORE key='\(key)', chunk=\(chunkIndex), size=\(image.size), total=\(totalImages)", category: .cache)
+                print("[LIVAImageCache] ✅ STORE key='\(key)', chunk=\(chunkIndex), size=\(image.size), total=\(totalImages)")
             }
         }
     }
@@ -399,7 +399,7 @@ class LIVAImageCache {
             }
 
             #if DEBUG
-            livaLog("[LIVAImageCache] Evicted \(totalEvicted) images from \(chunkIndices.count) chunks", category: .cache)
+            print("[LIVAImageCache] Evicted \(totalEvicted) images from \(chunkIndices.count) chunks")
             #endif
         }
     }
@@ -412,7 +412,7 @@ class LIVAImageCache {
             decodedKeys.removeAll()  // Clear decode tracking
 
             #if DEBUG
-            livaLog("[LIVAImageCache] Cleared all cached images", category: .cache)
+            print("[LIVAImageCache] Cleared all cached images")
             #endif
         }
     }
@@ -469,7 +469,7 @@ class LIVAImageCache {
 
     @objc private func handleMemoryWarning() {
         #if DEBUG
-        livaLog("[LIVAImageCache] ⚠️ Memory warning - NSCache will automatically evict objects", category: .cache)
+        print("[LIVAImageCache] ⚠️ Memory warning - NSCache will automatically evict objects")
         #endif
 
         // NSCache handles this automatically, but we can help by clearing oldest chunks

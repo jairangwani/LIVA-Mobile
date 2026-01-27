@@ -39,6 +39,17 @@ public struct LIVAConfiguration {
     /// Enable verbose logging (default: false)
     public var verboseLogging: Bool = false
 
+    // MARK: - Instant Start Settings
+
+    /// Enable instant start (unlock UI as soon as idle loads) (default: true)
+    public var enableInstantStart: Bool = true
+
+    /// Timeout for idle animation loading before allowing interaction anyway (default: 5.0 seconds)
+    public var idleLoadTimeoutSeconds: Double = 5.0
+
+    /// Maximum retry attempts for failed animation loads (default: 3)
+    public var maxAnimationRetries: Int = 3
+
     /// Initialize configuration
     /// - Parameters:
     ///   - serverURL: Backend server URL
@@ -50,6 +61,9 @@ public struct LIVAConfiguration {
     ///   - maxCachedImages: Max cached images (default: 2000)
     ///   - maxCacheMemoryMB: Max cache memory MB (default: 200)
     ///   - verboseLogging: Enable verbose logging (default: false)
+    ///   - enableInstantStart: Enable instant start (default: true)
+    ///   - idleLoadTimeoutSeconds: Timeout for idle loading (default: 5.0)
+    ///   - maxAnimationRetries: Max retry attempts (default: 3)
     public init(
         serverURL: String,
         userId: String,
@@ -59,7 +73,10 @@ public struct LIVAConfiguration {
         minFramesBeforeStart: Int = 30,
         maxCachedImages: Int = 2000,
         maxCacheMemoryMB: Int = 200,
-        verboseLogging: Bool = false
+        verboseLogging: Bool = false,
+        enableInstantStart: Bool = true,
+        idleLoadTimeoutSeconds: Double = 5.0,
+        maxAnimationRetries: Int = 3
     ) {
         self.serverURL = serverURL
         self.userId = userId
@@ -70,6 +87,9 @@ public struct LIVAConfiguration {
         self.maxCachedImages = maxCachedImages
         self.maxCacheMemoryMB = maxCacheMemoryMB
         self.verboseLogging = verboseLogging
+        self.enableInstantStart = enableInstantStart
+        self.idleLoadTimeoutSeconds = idleLoadTimeoutSeconds
+        self.maxAnimationRetries = maxAnimationRetries
     }
 }
 
