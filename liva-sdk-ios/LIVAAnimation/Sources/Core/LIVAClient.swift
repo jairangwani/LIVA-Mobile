@@ -337,39 +337,37 @@ public final class LIVAClient {
 
         clientLog("[LIVAClient] 📥 handleFrameBatchReceived: chunk=\(chunkIndex), batch=\(batchIndex), frames=\(frameCount)")
 
-        // Initialize tracking arrays for this chunk if needed
+        // Initialize tracking arrays for this chunk if needed (once per chunk)
         if pendingOverlayFrames[chunkIndex] == nil {
             pendingOverlayFrames[chunkIndex] = []
+            pendingOverlayFrames[chunkIndex]?.reserveCapacity(120) // Typical chunk size
         }
 
-        // PERFORMANCE FIX: Build metadata synchronously (fast) but decode images asynchronously (slow)
-        // This ensures pendingOverlayFrames is populated when chunk_ready arrives,
-        // while avoiding main thread blocking from Base64 decoding
-        for (index, frame) in frameBatch.frames.enumerated() {
-            let imageDataString = frame.imageData
+        // OPTIMIZED: Pre-allocate array and cache engine reference
+        var newFrames: [OverlayFrame] = []
+        newFrames.reserveCapacity(frameCount)
+        let engine = newAnimationEngine // Cache to avoid optional unwrap in loop
+        var animName: String? = nil
+
+        // OPTIMIZED LOOP: Minimal work per iteration
+        for frame in frameBatch.frames {
             let contentKey = frame.contentBasedCacheKey
 
-            // ASYNC: Decode Base64 and create UIImage on background thread (heavy work)
-            let sequenceIndex = frame.sequenceIndex
-            newAnimationEngine?.processAndCacheOverlayImageAsync(
-                base64Data: imageDataString,
+            // ASYNC: Decode image on background (just dispatch, no completion closure overhead)
+            engine?.processAndCacheOverlayImageAsync(
+                base64Data: frame.imageData,
                 key: contentKey,
-                chunkIndex: chunkIndex
-            ) { success in
-                if !success {
-                    clientLog("[LIVAClient] ⚠️ Failed to process frame \(index) for chunk \(chunkIndex)")
-                } else if sequenceIndex == 0 {
-                    clientLog("[LIVAClient] ✅ Async cached first frame: \(contentKey)")
-                }
+                chunkIndex: chunkIndex,
+                completion: nil  // Skip completion to reduce overhead
+            )
+
+            // Track first non-empty animation name
+            if animName == nil && !frame.animationName.isEmpty {
+                animName = frame.animationName
             }
 
-            // Track animation name for this chunk
-            if chunkAnimationNames[chunkIndex] == nil && !frame.animationName.isEmpty {
-                chunkAnimationNames[chunkIndex] = frame.animationName
-            }
-
-            // SYNC: Build OverlayFrame metadata (fast - just struct creation)
-            let overlayFrame = OverlayFrame(
+            // Build OverlayFrame (struct copy is fast)
+            newFrames.append(OverlayFrame(
                 matchedSpriteFrameNumber: frame.matchedSpriteFrameNumber,
                 sheetFilename: frame.sheetFilename,
                 coordinates: .zero,
@@ -380,8 +378,15 @@ public final class LIVAClient {
                 overlayId: contentKey,
                 char: frame.char,
                 viseme: nil
-            )
-            pendingOverlayFrames[chunkIndex]?.append(overlayFrame)
+            ))
+        }
+
+        // Batch append (single array operation instead of N appends)
+        pendingOverlayFrames[chunkIndex]?.append(contentsOf: newFrames)
+
+        // Set animation name once
+        if let animName = animName, chunkAnimationNames[chunkIndex] == nil {
+            chunkAnimationNames[chunkIndex] = animName
         }
 
         // Also store for legacy engine (old path)
