@@ -275,6 +275,14 @@ class LIVAAnimationEngine {
         mode = .idle
     }
 
+    /// Check if an animation is already loaded in the engine
+    /// - Parameter name: Animation name
+    /// - Returns: True if animation exists and has frames
+    func hasAnimation(_ name: String) -> Bool {
+        guard let frames = animationFrames[name] else { return false }
+        return !frames.isEmpty
+    }
+
     /// Load base animation frames
     /// - Parameters:
     ///   - name: Animation name (e.g., "idle_1_s")

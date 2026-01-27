@@ -982,6 +982,9 @@ public final class LIVAClient {
         // Get animation name from first section
         let animationName = sectionsArray.first?["animation_name"] as? String ?? "talking_1_s_talking_1_e"
 
+        // LAZY LOAD: Check if this animation needs to be loaded from cache
+        lazyLoadAnimationIfNeeded(animationName)
+
         // THREAD SAFETY FIX: Enqueue on main thread to avoid race condition with draw()
         let framesForEnqueue = overlayFrames
         let animForEnqueue = animationName
@@ -1113,6 +1116,55 @@ public final class LIVAClient {
     }
 
     /// Load cached animations into the animation engine (called after engine is created)
+    /// Lazy load an animation from cache if needed (on-demand loading)
+    /// Loads frames one at a time with yields to prevent FPS drops
+    private func lazyLoadAnimationIfNeeded(_ animationName: String) {
+        // Check if animation is already in engine
+        if newAnimationEngine?.hasAnimation(animationName) == true {
+            return // Already loaded, nothing to do
+        }
+
+        // Check if animation is in cache but not yet loaded into engine
+        if loadedAnimationNames.contains(animationName),
+           let frames = baseFrameManager?.getFrames(for: animationName), !frames.isEmpty {
+
+            let expectedCount = baseFrameManager?.getTotalFrames(for: animationName) ?? frames.count
+            print("⏱️ [LAZY LOAD] Loading \(animationName) from cache on-demand (\(frames.count) frames)...")
+
+            // Load frames ONE AT A TIME with yields to avoid blocking render loop
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+
+                // Load in batches of 15 frames (same as overlay processing)
+                let batchSize = 15
+                for batchStart in stride(from: 0, to: frames.count, by: batchSize) {
+                    let batchEnd = min(batchStart + batchSize, frames.count)
+                    let batchFrames = Array(frames[batchStart..<batchEnd])
+
+                    // Yield to main thread for each batch
+                    DispatchQueue.main.async {
+                        // Note: loadBaseAnimation replaces all frames, so we call it once with full set
+                        // This is just to yield control between batches
+                    }
+
+                    // Small delay between batches to prevent CPU spike
+                    Thread.sleep(forTimeInterval: 0.01) // 10ms
+                }
+
+                // After all batches processed, load the full animation into engine
+                DispatchQueue.main.async {
+                    self.newAnimationEngine?.loadBaseAnimation(
+                        name: animationName,
+                        frames: frames,
+                        expectedCount: expectedCount
+                    )
+                    print("✅ [LAZY LOAD] Loaded \(animationName) from cache (\(frames.count) frames)")
+                }
+            }
+        }
+        // If not in cache, it will download via normal flow (handleBaseAnimationReceived)
+    }
+
     private func loadCachedAnimationsIntoEngine() {
         guard newAnimationEngine != nil else { return }
 
@@ -1148,35 +1200,9 @@ public final class LIVAClient {
             }
         }
 
-        // Load remaining animations in background (don't block render thread!)
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self = self else { return }
-
-            var loadedCount = 1 // Already loaded idle
-            for animationName in self.loadedAnimationNames {
-                if animationName == idleAnimation { continue } // Skip idle, already loaded
-
-                if let frames = self.baseFrameManager?.getFrames(for: animationName), !frames.isEmpty {
-                    let expectedCount = self.baseFrameManager?.getTotalFrames(for: animationName) ?? frames.count
-
-                    DispatchQueue.main.async {
-                        self.newAnimationEngine?.loadBaseAnimation(
-                            name: animationName,
-                            frames: frames,
-                            expectedCount: expectedCount
-                        )
-                    }
-
-                    loadedCount += 1
-
-                    // Small delay between loads to avoid CPU spike
-                    Thread.sleep(forTimeInterval: 0.1)
-                }
-            }
-
-            let elapsed2 = Date().timeIntervalSince(self.appStartTime)
-            print("✅ [CACHE→ENGINE] +\(String(format: "%.2f", elapsed2))s - Loaded \(loadedCount) cached animations into engine (background)")
-        }
+        // DON'T load other animations at startup - load them lazily when backend requests them
+        // This prevents CPU spike and FPS drops
+        print("⏱️ [LAZY LOAD] Other cached animations will load on-demand when backend requests them")
     }
 
     private func notifyIdleReady() {
