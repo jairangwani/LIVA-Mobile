@@ -60,6 +60,18 @@ final class LIVASocketManager {
         let frameIndex: Int
         let matchedSpriteFrameNumber: Int
         let char: String
+        let overlayId: String?  // Content-based cache key from backend
+
+        /// Generate content-based cache key (same format as web)
+        /// Format: "{animation_name}/{matched_sprite_frame_number}/{sheet_filename}"
+        var contentBasedCacheKey: String {
+            // Use backend's overlay_id if available
+            if let overlayId = overlayId, !overlayId.isEmpty {
+                return overlayId
+            }
+            // Fallback: construct from available fields (matches web format)
+            return "\(animationName)/\(matchedSpriteFrameNumber)/\(sheetFilename)"
+        }
     }
 
     // MARK: - Properties
@@ -297,6 +309,18 @@ final class LIVASocketManager {
         ])
     }
 
+    /// Set session ID for backend frame logging
+    /// This allows backend to log frames to the same session as iOS
+    func setSessionId(_ sessionId: String) {
+        guard let socket = socket, socket.status == .connected else {
+            socketLog("[LIVASocketManager] Cannot set session ID - not connected")
+            return
+        }
+
+        socketLog("[LIVASocketManager] 📤 Setting session ID: \(sessionId)")
+        socket.emit("set_session_id", ["session_id": sessionId])
+    }
+
     // MARK: - Event Parsing
 
     private func handleAudioEvent(_ data: [Any]) {
@@ -394,7 +418,8 @@ final class LIVASocketManager {
                     sectionIndex: frameDict["section_index"] as? Int ?? 0,
                     frameIndex: frameDict["frame_index"] as? Int ?? 0,
                     matchedSpriteFrameNumber: frameDict["matched_sprite_frame_number"] as? Int ?? 0,
-                    char: frameDict["char"] as? String ?? ""
+                    char: frameDict["char"] as? String ?? "",
+                    overlayId: frameDict["overlay_id"] as? String
                 )
                 frames.append(frame)
             }

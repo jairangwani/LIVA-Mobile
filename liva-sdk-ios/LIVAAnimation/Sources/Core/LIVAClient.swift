@@ -106,6 +106,9 @@ public final class LIVAClient {
         // Note: Needs canvas view to be attached first
         // Will be initialized in attachView()
 
+        // Configure session logger for centralized logging to LIVA-TESTS/logs/sessions/
+        LIVASessionLogger.shared.configure(serverUrl: config.serverURL)
+
         setupAnimationEngineCallbacks()
         setupAudioPlayerCallbacks()
         setupBaseFrameManagerCallbacks()
@@ -144,6 +147,11 @@ public final class LIVAClient {
 
     /// Disconnect from the server
     public func disconnect() {
+        // End session logging before disconnect
+        LIVASessionLogger.shared.endSession {
+            clientLog("[LIVAClient] 📊 Ended logging session")
+        }
+
         canvasView?.stopRenderLoop()
         audioPlayer?.stop()
         animationEngine?.clearQueue()
@@ -190,6 +198,17 @@ public final class LIVAClient {
             self?.state = .connected
             // NOTE: Don't start legacy canvas render loop - new animation engine handles rendering
             // self?.canvasView?.startRenderLoop()
+
+            // Start session logging to LIVA-TESTS/logs/sessions/
+            let userId = self?.configuration?.userId ?? ""
+            let agentId = self?.configuration?.agentId ?? ""
+            LIVASessionLogger.shared.startSession(userId: userId, agentId: agentId) { sessionId in
+                if let sessionId = sessionId {
+                    clientLog("[LIVAClient] 📊 Started logging session: \(sessionId)")
+                    // Tell backend to log frames to same session (enables backend vs iOS comparison)
+                    self?.socketManager?.setSessionId(sessionId)
+                }
+            }
 
             // Request animations manifest to start loading base frames
             if let agentId = self?.configuration?.agentId {
@@ -321,29 +340,23 @@ public final class LIVAClient {
         for (index, frame) in frameBatch.frames.enumerated() {
             let imageDataString = frame.imageData
 
-            // CRITICAL FIX: Use array index (position in batch) for cache key, NOT backend's sequence_index
-            // Web frontend does the same: uses loop index when storing, state.currentDrawingFrame when retrieving
-            // This ensures cache keys match during playback: store at "0_0_0", "0_0_1", "0_0_2"...
-            // Retrieve at array position 0, 1, 2... which generates same keys
-            let frameIndexInChunk = (pendingOverlayFrames[chunkIndex]?.count ?? 0)
-            let key = getOverlayKey(
-                chunkIndex: chunkIndex,
-                sectionIndex: 0, // Always use 0 to match overlay section lookup
-                sequenceIndex: frameIndexInChunk  // Use array position, NOT frame.sequenceIndex!
-            )
+            // CONTENT-BASED CACHING: Use overlay_id (or generated key) instead of positional indices
+            // This prevents wrong images if cache isn't cleared between messages (matches web behavior)
+            // Format: "{animation_name}/{matched_sprite_frame_number}/{sheet_filename}"
+            let contentKey = frame.contentBasedCacheKey
 
             // ASYNC PROCESSING: Decode Base64 and create UIImage on background thread
             // This prevents FPS drops when new chunks arrive during playback
             let sequenceIndex = frame.sequenceIndex
             newAnimationEngine?.processAndCacheOverlayImageAsync(
                 base64Data: imageDataString,
-                key: key,
+                key: contentKey,
                 chunkIndex: chunkIndex
             ) { success in
                 if !success {
                     clientLog("[LIVAClient] ⚠️ Failed to process frame \(index) for chunk \(chunkIndex)")
                 } else if sequenceIndex == 0 {
-                    clientLog("[LIVAClient] ✅ Async cached first frame: \(key)")
+                    clientLog("[LIVAClient] ✅ Async cached first frame: \(contentKey)")
                 }
             }
 
@@ -362,7 +375,7 @@ public final class LIVAClient {
                 sequenceIndex: frame.sequenceIndex,
                 animationName: frame.animationName,
                 originalFrameIndex: frame.frameIndex,
-                overlayId: nil,
+                overlayId: contentKey,  // CONTENT-BASED: Store the cache key for lookup
                 char: frame.char,
                 viseme: nil
             )
@@ -393,8 +406,14 @@ public final class LIVAClient {
 
             // Update coordinates for each frame using the overlay position
             // Get first frame's image to determine frame size
-            // Use sectionIndex 0 (all frames in a chunk share the same section)
-            let firstKey = getOverlayKey(chunkIndex: chunkIndex, sectionIndex: 0, sequenceIndex: 0)
+            // CONTENT-BASED CACHING: Use overlayId from first frame
+            let firstFrame = overlayFrames[0]
+            let firstKey = getOverlayCacheKey(
+                for: firstFrame,
+                chunkIndex: chunkIndex,
+                sectionIndex: 0,
+                sequenceIndex: 0
+            )
             var frameSize = CGSize(width: 300, height: 300) // Default size
             if let firstImage = newAnimationEngine?.getOverlayImage(forKey: firstKey) {
                 frameSize = firstImage.size
@@ -644,12 +663,23 @@ public final class LIVAClient {
             return
         }
 
-        // Cache for later playback
-        let key = getOverlayKey(
-            chunkIndex: chunkIndex,
-            sectionIndex: sectionIndex,
-            sequenceIndex: sequenceIndex
-        )
+        // CONTENT-BASED CACHING: Use overlay_id if available, otherwise fallback to positional key
+        let key: String
+        if let overlayId = dict["overlay_id"] as? String, !overlayId.isEmpty {
+            key = overlayId
+        } else if let animationName = dict["animation_name"] as? String,
+                  let spriteFrame = dict["matched_sprite_frame_number"] as? Int,
+                  let sheetFilename = dict["sheet_filename"] as? String {
+            // Construct content-based key from available fields
+            key = "\(animationName)/\(spriteFrame)/\(sheetFilename)"
+        } else {
+            // Fallback to positional key
+            key = getOverlayKey(
+                chunkIndex: chunkIndex,
+                sectionIndex: sectionIndex,
+                sequenceIndex: sequenceIndex
+            )
+        }
 
         newAnimationEngine?.cacheOverlayImage(image, forKey: key, chunkIndex: chunkIndex)
     }

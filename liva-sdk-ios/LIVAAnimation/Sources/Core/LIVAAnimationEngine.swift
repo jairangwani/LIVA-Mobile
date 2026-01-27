@@ -441,11 +441,17 @@ class LIVAAnimationEngine {
             if overlayDriven.shouldStartPlaying {
                 overlayStates[overlayDriven.sectionIndex].playing = true
                 overlayStates[overlayDriven.sectionIndex].currentDrawingFrame = 0
-                overlayStates[overlayDriven.sectionIndex].skipFirstAdvance = true
+                // NOTE: skipFirstAdvance REMOVED - was causing frame 0 to draw twice
                 overlayStates[overlayDriven.sectionIndex].startTime = now
                 mode = .overlay
 
                 animLog("[LIVAAnimationEngine] 🎬 Starting overlay chunk \(overlayDriven.chunkIndex)")
+
+                // SESSION LOGGER: Log chunk start event
+                LIVASessionLogger.shared.logEvent("CHUNK_START", details: [
+                    "chunk": overlayDriven.chunkIndex,
+                    "animation": overlayDriven.animationName
+                ])
 
                 // AUDIO-ANIMATION SYNC: Start audio when first frame of chunk renders
                 // This ensures perfect lip sync (audio and animation start together)
@@ -502,14 +508,13 @@ class LIVAAnimationEngine {
 
                 let overlayFrame = section.frames[state.currentDrawingFrame]
 
-                // CRITICAL FIX: Use array index (state.currentDrawingFrame) for cache lookup
-                // This matches how web frontend does it and how we store images in LIVAClient
-                // Store: key = "chunk_section_arrayIndex" (0, 1, 2, 3...)
-                // Lookup: key = "chunk_section_currentDrawingFrame" (0, 1, 2, 3...)
-                let key = getOverlayKey(
+                // CONTENT-BASED CACHING: Use overlayId from frame instead of positional key
+                // This matches web behavior and prevents wrong images on cache miss/corruption
+                let key = getOverlayCacheKey(
+                    for: overlayFrame,
                     chunkIndex: section.chunkIndex,
                     sectionIndex: section.sectionIndex,
-                    sequenceIndex: state.currentDrawingFrame  // Use array index, NOT overlayFrame.sequenceIndex!
+                    sequenceIndex: state.currentDrawingFrame
                 )
                 overlayKey = key
 
@@ -557,13 +562,21 @@ class LIVAAnimationEngine {
             if mode == .overlay && !overlaySections.isEmpty {
                 currentChunkIndex = overlaySections.first?.chunkIndex ?? 0
                 let drawFrame = overlayStates.first?.currentDrawingFrame ?? 0
-                // Get the actual sequenceIndex from the frame metadata
+                // Get the actual sequenceIndex and content-based key from the frame metadata
                 if let section = overlaySections.first, drawFrame < section.frames.count {
-                    currentOverlaySeq = section.frames[drawFrame].sequenceIndex
+                    let overlayFrame = section.frames[drawFrame]
+                    currentOverlaySeq = overlayFrame.sequenceIndex
+                    // Use content-based key for debug display
+                    currentOverlayKey = getOverlayCacheKey(
+                        for: overlayFrame,
+                        chunkIndex: currentChunkIndex,
+                        sectionIndex: 0,
+                        sequenceIndex: currentOverlaySeq
+                    )
                 } else {
                     currentOverlaySeq = drawFrame
+                    currentOverlayKey = ""
                 }
-                currentOverlayKey = getOverlayKey(chunkIndex: currentChunkIndex, sectionIndex: 0, sequenceIndex: currentOverlaySeq)
             } else {
                 currentOverlayKey = ""
                 currentOverlaySeq = 0
@@ -581,6 +594,26 @@ class LIVAAnimationEngine {
                 overlaySeq: currentOverlaySeq,
                 chunkIndex: currentChunkIndex
             )
+
+            // SESSION LOGGER: Only log overlay/talking frames, skip idle to reduce clutter
+            if mode == .overlay {
+                let isInSync: Bool
+                if let overlayDriven = overlayDrivenFrame {
+                    isInSync = (backendMatchedSprite != nil && backendMatchedSprite! % max(baseFrameCount, 1) == overlayDriven.frameIndex)
+                } else {
+                    isInSync = true
+                }
+
+                LIVASessionLogger.shared.logFrame(
+                    chunk: currentChunkIndex,
+                    seq: currentOverlaySeq,
+                    anim: currentOverlayBaseName,
+                    baseFrame: baseFrameNum,
+                    overlayKey: currentOverlayKey,
+                    syncStatus: isInSync ? "SYNC" : "DESYNC",
+                    fps: currentFPS
+                )
+            }
         } else {
             animLog("[LIVAAnimationEngine] ⚠️ No base image for frame \(globalFrameIndex) in \(currentOverlayBaseName)")
         }
@@ -635,11 +668,12 @@ class LIVAAnimationEngine {
             // If already playing, use its current frame requirement
             if state.playing {
                 let overlayFrame = section.frames[state.currentDrawingFrame]
-                let baseFrameCount = getBaseFrameCount(for: section.frames[0].animationName)
+                // FIX: Use current frame's animation name, not first frame's (matches web behavior)
+                let baseFrameCount = getBaseFrameCount(for: overlayFrame.animationName)
                 let baseFrameIndex = overlayFrame.matchedSpriteFrameNumber % baseFrameCount
 
                 return OverlayDrivenFrame(
-                    animationName: section.frames[0].animationName,
+                    animationName: overlayFrame.animationName,  // FIX: Use current frame's animation
                     frameIndex: baseFrameIndex,
                     sectionIndex: index,
                     shouldStartPlaying: false,
@@ -650,11 +684,12 @@ class LIVAAnimationEngine {
             // Check if ready to start (first frame decoded)
             if !state.playing && !state.done && isFirstOverlayFrameReady(section) {
                 let overlayFrame = section.frames[0]
-                let baseFrameCount = getBaseFrameCount(for: section.frames[0].animationName)
+                // Use overlayFrame.animationName for consistency (same as frames[0] here)
+                let baseFrameCount = getBaseFrameCount(for: overlayFrame.animationName)
                 let baseFrameIndex = overlayFrame.matchedSpriteFrameNumber % baseFrameCount
 
                 return OverlayDrivenFrame(
-                    animationName: section.frames[0].animationName,
+                    animationName: overlayFrame.animationName,  // Consistent with above
                     frameIndex: baseFrameIndex,
                     sectionIndex: index,
                     shouldStartPlaying: true, // Signal to start playing
@@ -668,13 +703,14 @@ class LIVAAnimationEngine {
 
     /// Check if first overlay frame is ready to play
     private func isFirstOverlayFrameReady(_ section: OverlaySection) -> Bool {
-        guard !section.frames.isEmpty else { return false }
+        guard let firstFrame = section.frames.first else { return false }
 
-        // Use array index 0 for first frame (matches how we store images)
-        let key = getOverlayKey(
+        // CONTENT-BASED CACHING: Use overlayId from frame for lookup
+        let key = getOverlayCacheKey(
+            for: firstFrame,
             chunkIndex: section.chunkIndex,
             sectionIndex: section.sectionIndex,
-            sequenceIndex: 0  // First frame is at array index 0
+            sequenceIndex: 0
         )
 
         let hasImage = imageCache.hasImage(forKey: key)
@@ -710,22 +746,39 @@ class LIVAAnimationEngine {
 
                 guard state.playing && !state.done else { continue }
 
-                // Skip first advance to sync with base frame
-                if state.skipFirstAdvance {
-                    state.skipFirstAdvance = false
-                    overlayStates[index] = state
+                // JITTER FIX: Skip if holding at last frame waiting for next chunk buffer
+                if state.holdingLastFrame {
                     continue
                 }
 
-                // Advance overlay frame counter
-                state.currentDrawingFrame += 1
-                didAdvance = true
+                // NOTE: skipFirstAdvance logic REMOVED - was causing frame 0 to draw twice
+                // The getOverlayDrivenBaseFrame() already handles synchronization correctly.
 
-                if state.currentDrawingFrame >= section.frames.count {
+                // Check if this is the last frame
+                let isLastFrame = state.currentDrawingFrame >= section.frames.count - 1
+
+                if isLastFrame {
+                    // JITTER FIX: Before marking done, check if next chunk buffer is ready
+                    if !overlayQueue.isEmpty {
+                        let nextChunk = overlayQueue.first!
+                        if !isBufferReady(nextChunk.section) {
+                            // Buffer NOT ready - hold at last frame
+                            state.holdingLastFrame = true
+                            overlayStates[index] = state
+                            animLog("[LIVAAnimationEngine] ⏸️ HOLDING: Chunk \(section.chunkIndex) waiting for next chunk buffer")
+                            continue
+                        }
+                    }
+
+                    // Buffer ready (or no more chunks) - mark done
                     state.playing = false
                     state.done = true
-
+                    state.holdingLastFrame = false
                     animLog("[LIVAAnimationEngine] ✅ Overlay chunk \(section.chunkIndex) finished")
+                } else {
+                    // Not last frame - advance normally
+                    state.currentDrawingFrame += 1
+                    didAdvance = true
                 }
 
                 overlayStates[index] = state
@@ -890,8 +943,9 @@ class LIVAAnimationEngine {
             currentDrawingFrame: 0,
             done: false,
             audioStarted: false,
-            skipFirstAdvance: true,
-            startTime: nil
+            // NOTE: skipFirstAdvance REMOVED - was causing frame 0 to draw twice
+            startTime: nil,
+            holdingLastFrame: false
         )
 
         overlaySections = [queued.section]
@@ -909,11 +963,15 @@ class LIVAAnimationEngine {
         var readyCount = 0
 
         for i in 0..<framesToCheck {
-            // Use array index for cache lookup (matches how we store images)
-            let key = getOverlayKey(
+            guard i < section.frames.count else { break }
+            let frame = section.frames[i]
+
+            // CONTENT-BASED CACHING: Use overlayId from frame for lookup
+            let key = getOverlayCacheKey(
+                for: frame,
                 chunkIndex: section.chunkIndex,
                 sectionIndex: section.sectionIndex,
-                sequenceIndex: i  // Use array index, NOT frame.sequenceIndex!
+                sequenceIndex: i
             )
 
             if imageCache.hasImage(forKey: key) {

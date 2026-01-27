@@ -1,0 +1,256 @@
+# LIVA-Mobile
+
+Mobile SDKs for LIVA AI avatar system (iOS, Android, Flutter).
+
+## Quick Start (iOS)
+
+```bash
+cd LIVA-Mobile/liva-sdk-ios
+
+# Open in Xcode
+open LIVAAnimation.xcodeproj
+
+# Or use Swift Package Manager
+# Add https://github.com/jairangwani/LIVA-Mobile as dependency
+```
+
+**Requires:** Backend running on http://localhost:5003
+
+---
+
+## Project Structure
+
+```
+LIVA-Mobile/
+├── liva-sdk-ios/
+│   └── LIVAAnimation/
+│       └── Sources/
+│           ├── Core/
+│           │   ├── LIVAClient.swift           # Main SDK entry point
+│           │   ├── LIVAAnimationEngine.swift  # Animation rendering (Metal)
+│           │   ├── LIVASessionLogger.swift    # Session-based logging
+│           │   └── LIVAConfig.swift           # Configuration
+│           ├── Models/                        # Data models
+│           ├── Networking/                    # Socket.IO, HTTP
+│           └── UI/                            # SwiftUI views
+├── liva-sdk-android/                          # Android SDK (future)
+├── liva-flutter/                              # Flutter SDK (future)
+└── CLAUDE.md                                  # This file
+```
+
+---
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `LIVAClient.swift` | Main SDK class, manages connection and session |
+| `LIVAAnimationEngine.swift` | Metal-based animation rendering |
+| `LIVASessionLogger.swift` | Sends logs to backend for debugging |
+| `LIVAOverlayManager.swift` | Manages lip sync overlay images |
+
+---
+
+## Animation Logging
+
+iOS automatically logs frames to the backend session logging system.
+
+**View logs:**
+```bash
+# Web UI (RECOMMENDED)
+open http://localhost:5003/logs
+
+# Sessions appear as: 2026-01-27_HHMMSS_ios
+```
+
+---
+
+## Claude Code: Using the Logging System
+
+### How iOS Logging Works
+
+1. **Session starts** when `LIVAClient.connect()` is called
+2. **Frames logged** every render cycle in `LIVAAnimationEngine.swift`
+3. **Events logged** on chunk start, transitions, errors
+4. **Session ends** when `LIVAClient.disconnect()` is called
+
+### Key Integration Points
+
+**LIVAClient.swift:**
+```swift
+// Configure logger (line ~110)
+LIVASessionLogger.shared.configure(serverUrl: config.serverURL)
+
+// Start session (line ~205)
+LIVASessionLogger.shared.startSession(userId: userId, agentId: agentId)
+
+// End session (line ~151)
+LIVASessionLogger.shared.endSession()
+```
+
+**LIVAAnimationEngine.swift:**
+```swift
+// Log chunk start (line ~451)
+LIVASessionLogger.shared.logEvent("CHUNK_START", details: [
+    "chunk": chunkIndex,
+    "frames": frameCount
+])
+
+// Log frame (line ~607)
+LIVASessionLogger.shared.logFrame(
+    chunk: currentChunkIndex,
+    seq: currentOverlaySeq,
+    anim: currentOverlayBaseName,
+    baseFrame: baseFrameNum,
+    overlayKey: currentOverlayKey,
+    syncStatus: isInSync ? "SYNC" : "DESYNC",
+    fps: currentFPS
+)
+```
+
+### Adding Custom Debug Logs
+
+```swift
+import LIVAAnimation
+
+// Log an event
+LIVASessionLogger.shared.logEvent("MY_DEBUG_EVENT", details: [
+    "chunk": chunkIndex,
+    "reason": "something happened",
+    "value": 123
+])
+
+// Check if session is active
+if LIVASessionLogger.shared.isSessionActive {
+    // Logging is enabled
+}
+
+// Disable logging (if needed)
+LIVASessionLogger.shared.isEnabled = false
+```
+
+### Log Format
+
+iOS logs use source `IOS`:
+```
+timestamp|IOS|session|chunk|seq|anim|base|overlay|sync|fps|||
+```
+
+**Example:**
+```
+2026-01-27T10:30:45.123|IOS|2026-01-27_103045_ios|0|24|talking_2_s_e|4|J1_X2_M0.webp|SYNC|30.0|||
+```
+
+**Note:** iOS doesn't send `char`, `buffer`, `next_chunk` fields (these are frontend-specific debug data).
+
+### Debugging Tips
+
+1. **Check session created:** Look for `[LIVASessionLogger] Started session:` in Xcode console
+2. **View logs:** Open http://localhost:5003/logs, select the `_ios` session
+3. **Compare with web:** Run same interaction on web and iOS, compare frame logs
+4. **Look for DESYNC:** Check if sprite numbers match between backend and iOS
+
+### Common Issues
+
+**No logs appearing:**
+- Check `LIVASessionLogger.shared.isEnabled` is true
+- Verify backend URL is correct
+- Check network connectivity to backend
+
+**Session not starting:**
+- Ensure `configure(serverUrl:)` is called before `startSession()`
+- Check backend is running on expected port
+
+---
+
+## Testing iOS (CRITICAL - Use Test Script)
+
+**Do NOT type manually in the iOS app to test. Use the test script.**
+
+### Quick Start
+
+```bash
+# 1. Ensure backend is running
+cd ../AnnaOS-API && python main.py
+
+# 2. Start iOS app in simulator
+cd liva-flutter-app
+flutter run -d "iPhone 15 Pro"
+# WAIT 20+ seconds for socket to fully connect
+
+# 3. Send test messages via script
+cd ../LIVA-TESTS
+./scripts/ios-test.sh                    # Default "Hello from test script"
+./scripts/ios-test.sh "Custom message"   # Custom message
+```
+
+### What the Test Script Does
+
+`LIVA-TESTS/scripts/ios-test.sh`:
+1. Checks backend is running at localhost:5003
+2. Finds active iOS session
+3. Sends HTTP POST to `/messages` endpoint
+4. Waits for animation to complete
+5. Reports: BACKEND frames sent vs IOS frames rendered
+6. Reports any DESYNC errors
+
+### Viewing Logs
+
+```bash
+# Web UI (best)
+open http://localhost:5003/logs
+
+# CLI - latest iOS session
+SESSION=$(ls -t ../LIVA-TESTS/logs/sessions | grep _ios | head -1)
+cat ../LIVA-TESTS/logs/sessions/$SESSION/events.log
+cat ../LIVA-TESTS/logs/sessions/$SESSION/frames.log | head -50
+
+# Check sync status
+grep "DESYNC" ../LIVA-TESTS/logs/sessions/$SESSION/frames.log | wc -l
+```
+
+### Comparing iOS vs Web
+
+```bash
+# 1. Clear sessions
+rm -rf ../LIVA-TESTS/logs/sessions/2026-*
+
+# 2. Test web - open http://localhost:3005, send message
+
+# 3. Test iOS - use test script
+./scripts/ios-test.sh "Same message as web"
+
+# 4. Compare in http://localhost:5003/logs
+# Look for differences in:
+#   - Chunk timing
+#   - Frame sequence
+#   - Sync status
+#   - Animation transitions
+```
+
+### Test Script Output Example
+
+```
+=== iOS Animation Test ===
+Message: Hello world
+✓ Backend running
+✓ iOS session: 2026-01-27_120754_ios
+Sending message...
+✓ Message sent
+Waiting for animation...
+
+=== Results ===
+Session:        2026-01-27_120754_ios
+New frames:     1090
+Backend sent:   650
+iOS rendered:   1189
+Chunks:         8
+DESYNC errors:  0
+✓ Test PASSED - All frames in sync
+```
+
+---
+
+## Architecture Reference
+
+See main docs: [../CLAUDE.md](../CLAUDE.md)
