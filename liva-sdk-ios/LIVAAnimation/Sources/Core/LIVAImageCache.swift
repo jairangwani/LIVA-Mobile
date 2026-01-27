@@ -44,19 +44,12 @@ class LIVAImageCache {
     /// Callbacks when all images for a chunk are processed
     private var chunkCompletionCallbacks: [Int: () -> Void] = [:]
 
-    // MARK: - Constants
-
-    /// Maximum number of images to cache
-    private let maxImageCount = 2000
-
-    /// Maximum memory size (200 MB) - overlays need more space
-    private let maxMemorySize = 200 * 1024 * 1024
-
     // MARK: - Initialization
 
     init() {
-        cache.countLimit = maxImageCount
-        cache.totalCostLimit = maxMemorySize
+        // Default cache limits (can be configured via LIVAConfiguration)
+        cache.countLimit = 2000  // maxCachedImages
+        cache.totalCostLimit = 200 * 1024 * 1024  // 200 MB
         cache.name = "LIVAOverlayImageCache"
 
         // Listen for memory warnings

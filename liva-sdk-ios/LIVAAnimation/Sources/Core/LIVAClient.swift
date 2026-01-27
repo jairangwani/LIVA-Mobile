@@ -94,8 +94,6 @@ public final class LIVAClient {
     private var deferredChunkReady: [Int: Int] = [:]  // chunkIndex -> totalSent
     /// Lock for batch tracking state
     private let batchTrackingLock = NSLock()
-    /// Batch size for frame processing (matches web frontend's 15)
-    private let frameBatchSize = 15
 
     /// Background queue for frame processing (prevents main thread blocking)
     private let frameProcessingQueue = DispatchQueue(label: "com.liva.frameProcessing", qos: .userInitiated)
