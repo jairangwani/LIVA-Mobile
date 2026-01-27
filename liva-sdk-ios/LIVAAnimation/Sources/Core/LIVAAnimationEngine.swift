@@ -430,6 +430,16 @@ class LIVAAnimationEngine {
         lastFrameTime = now
         drawCallCount += 1
 
+        // FREEZE DETECTION: Log when frame delta is abnormally high (> 50ms = potential freeze)
+        if deltaTime > 0.050 && drawCallCount > 10 {
+            animLog("[LIVAAnimationEngine] ⚠️ FREEZE DETECTED: deltaTime=\(String(format: "%.1f", deltaTime * 1000))ms (expected ~16ms)")
+            LIVASessionLogger.shared.logEvent("FREEZE_DETECTED", details: [
+                "delta_ms": Int(deltaTime * 1000),
+                "draw_count": drawCallCount,
+                "mode": mode == .overlay ? "overlay" : "idle"
+            ])
+        }
+
         // Accumulate time for frame advancement (time-based animation)
         if mode == .overlay {
             overlayFrameAccumulator += deltaTime
@@ -647,6 +657,18 @@ class LIVAAnimationEngine {
         let renderTime = CACurrentMediaTime() - renderStart
         let totalDrawTime = CACurrentMediaTime() - drawStartTime
 
+        // SLOW FRAME DETECTION: Log immediately when draw takes too long (> 20ms)
+        if totalDrawTime > 0.020 {
+            animLog("[LIVAAnimationEngine] 🐢 SLOW FRAME: total=\(String(format: "%.1f", totalDrawTime * 1000))ms cache=\(String(format: "%.1f", cacheLookupTime * 1000))ms render=\(String(format: "%.1f", renderTime * 1000))ms")
+            LIVASessionLogger.shared.logEvent("SLOW_FRAME", details: [
+                "total_ms": Int(totalDrawTime * 1000),
+                "cache_ms": Int(cacheLookupTime * 1000),
+                "render_ms": Int(renderTime * 1000),
+                "chunk": currentChunkIndex,
+                "seq": currentOverlaySeq
+            ])
+        }
+
         // Performance tracking - log every second during overlay mode
         if perfTrackingEnabled && mode == .overlay {
             drawTimes.append(totalDrawTime)
@@ -762,11 +784,17 @@ class LIVAAnimationEngine {
         // Only advance when enough time has accumulated
         guard overlayFrameAccumulator >= overlayFrameDuration else { return }
 
-        // Consume accumulated time (advance one frame per duration)
-        while overlayFrameAccumulator >= overlayFrameDuration {
-            overlayFrameAccumulator -= overlayFrameDuration
+        // FRAME SKIP FIX: Only advance ONE frame per render cycle
+        // Previously used a while loop that could skip frames if time accumulated
+        // This caused visible stuttering where frames 11,12,13 were skipped (10 → 14)
+        // Cap accumulator to prevent runaway catch-up (max 2 frames worth)
+        if overlayFrameAccumulator > overlayFrameDuration * 2 {
+            overlayFrameAccumulator = overlayFrameDuration * 2
+        }
+        overlayFrameAccumulator -= overlayFrameDuration
 
-            var didAdvance = false
+        // Advance exactly one frame
+        var didAdvance = false
 
             for (index, section) in overlaySections.enumerated() {
                 var state = overlayStates[index]
@@ -821,10 +849,9 @@ class LIVAAnimationEngine {
                 overlayStates[index] = state
             }
 
-            // Count animation frame for FPS (not render frame)
-            if didAdvance {
-                animationFrameCount += 1
-            }
+        // Count animation frame for FPS (not render frame)
+        if didAdvance {
+            animationFrameCount += 1
         }
     }
 
