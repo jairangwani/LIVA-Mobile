@@ -68,9 +68,7 @@ public final class LIVAClient {
     // MARK: - Components
 
     private var socketManager: LIVASocketManager?
-    private var frameDecoder: FrameDecoder?
-    private var animationEngine: AnimationEngine? // OLD - Legacy support
-    private var newAnimationEngine: LIVAAnimationEngine? // NEW - Base + overlay rendering
+    private var newAnimationEngine: LIVAAnimationEngine?
     private var audioPlayer: AudioPlayer?
     private var baseFrameManager: BaseFrameManager?
     private weak var canvasView: LIVACanvasView?
@@ -82,7 +80,6 @@ public final class LIVAClient {
 
     // MARK: - State Tracking
 
-    private var currentChunkFrames: [Int: [DecodedFrame]] = [:]
     private var pendingOverlayPositions: [Int: CGPoint] = [:]
 
     // NEW - Track overlay frame metadata for new animation engine
@@ -107,8 +104,6 @@ public final class LIVAClient {
         self.configuration = config
 
         // Initialize components
-        frameDecoder = FrameDecoder()
-        animationEngine = AnimationEngine() // OLD - Legacy support
         audioPlayer = AudioPlayer()
         baseFrameManager = BaseFrameManager()
 
@@ -131,9 +126,8 @@ public final class LIVAClient {
     /// - Parameter view: The canvas view to render to
     public func attachView(_ view: LIVACanvasView) {
         self.canvasView = view
-        view.animationEngine = animationEngine // OLD - Legacy support
 
-        // NEW - Initialize new animation engine with canvas view
+        // Initialize animation engine with canvas view
         newAnimationEngine = LIVAAnimationEngine(canvasView: view)
         newAnimationEngine?.delegate = self  // Set delegate for audio-animation sync
 
@@ -164,9 +158,8 @@ public final class LIVAClient {
 
         canvasView?.stopRenderLoop()
         audioPlayer?.stop()
-        animationEngine?.clearQueue()
-        newAnimationEngine?.stopRendering() // NEW
-        newAnimationEngine?.reset() // NEW
+        newAnimationEngine?.stopRendering()
+        newAnimationEngine?.reset()
         socketManager?.disconnect()
         socketManager = nil
         state = .idle
@@ -181,14 +174,10 @@ public final class LIVAClient {
         // Stop any ongoing audio playback (like web's stopAllAudio)
         audioPlayer?.stop()
 
-        // Clear legacy animation engine
-        animationEngine?.clearQueue()
-
-        // Clear new animation engine caches and state
+        // Clear animation engine caches and state
         newAnimationEngine?.forceIdleNow()
 
         // Clear pending state in client
-        currentChunkFrames.removeAll()
         pendingOverlayPositions.removeAll()
         pendingOverlayFrames.removeAll()
         chunkAnimationNames.removeAll()
@@ -409,14 +398,8 @@ public final class LIVAClient {
             onBatchComplete(chunkIndex: chunkIndex)
         }
 
-        // Also store for legacy engine (old path)
-        frameDecoder?.decodeBatch(frameBatch) { [weak self] decodedFrames in
-            guard let self = self else { return }
-            if self.currentChunkFrames[chunkIndex] == nil {
-                self.currentChunkFrames[chunkIndex] = []
-            }
-            self.currentChunkFrames[chunkIndex]?.append(contentsOf: decodedFrames)
-        }
+        // NOTE: Legacy frameDecoder path removed - was causing double decode work
+        // The new processFrameMetadata() path handles all frame processing
     }
 
     /// Process a single frame's metadata and queue async image decode
@@ -490,9 +473,6 @@ public final class LIVAClient {
 
     /// Process chunk ready (extracted for deferred processing)
     private func processChunkReady(chunkIndex: Int, totalSent: Int) {
-        // Get all frames for this chunk (legacy engine)
-        let legacyFrames = currentChunkFrames[chunkIndex] ?? []
-
         // Get overlay position from audio event
         let overlayPosition = pendingOverlayPositions[chunkIndex] ?? .zero
 
@@ -557,27 +537,7 @@ public final class LIVAClient {
             clientLog("[LIVAClient] ✅ Enqueued overlay chunk \(chunkIndex) with \(framesWithCoordinates.count) frames, position: \(overlayPosition), animation: \(animationName)")
         }
 
-        // Legacy engine path
-        if !legacyFrames.isEmpty {
-            // Create animation chunk
-            let animationChunk = AnimationChunk(
-                chunkIndex: chunkIndex,
-                frames: legacyFrames,
-                overlayPosition: overlayPosition,
-                animationName: legacyFrames.first?.animationName ?? "",
-                isReady: true
-            )
-
-            // Queue for animation
-            animationEngine?.enqueueChunk(animationChunk)
-
-            // Also add frames directly for immediate playback
-            animationEngine?.enqueueFrames(legacyFrames, forChunk: chunkIndex)
-            animationEngine?.setOverlayPosition(overlayPosition)
-        }
-
         // Clean up stored frames
-        currentChunkFrames.removeValue(forKey: chunkIndex)
         pendingOverlayPositions.removeValue(forKey: chunkIndex)
         pendingOverlayFrames.removeValue(forKey: chunkIndex)
         chunkAnimationNames.removeValue(forKey: chunkIndex)
@@ -592,42 +552,25 @@ public final class LIVAClient {
     private func handleAudioEnd() {
         // Audio streaming is complete, animation will transition to idle
         // after current frames are played
-        animationEngine?.onAnimationComplete = { [weak self] in
-            if self?.state == .animating {
-                self?.state = .connected
-            }
-            self?.animationEngine?.transitionToIdle()
+        if state == .animating {
+            state = .connected
         }
     }
 
     private func handlePlayBaseAnimation(_ animationName: String) {
         // Handle base/idle animation request
         // This typically comes after speaking ends
-        animationEngine?.transitionToIdle()
+        newAnimationEngine?.reset()
         if state == .animating {
             state = .connected
         }
     }
 
-    // MARK: - Animation Engine Callbacks
+    // MARK: - Animation Engine Callbacks (NEW)
 
     private func setupAnimationEngineCallbacks() {
-        animationEngine?.onModeChange = { [weak self] mode in
-            switch mode {
-            case .talking:
-                if self?.state == .connected {
-                    self?.state = .animating
-                }
-            case .idle, .transition:
-                if self?.state == .animating {
-                    self?.state = .connected
-                }
-            }
-        }
-
-        animationEngine?.onChunkComplete = { [weak self] chunkIndex in
-            // Chunk animation complete
-        }
+        // New animation engine callbacks are handled via delegate (LIVAAnimationEngineDelegate)
+        // See: animationEngine(_:playAudioData:forChunk:) and animationEngineDidFinishAllChunks(_:)
     }
 
     // MARK: - Audio Player Callbacks
@@ -642,8 +585,8 @@ public final class LIVAClient {
         }
 
         audioPlayer?.onPlaybackComplete = { [weak self] in
-            // All audio complete
-            self?.animationEngine?.transitionToIdle()
+            // All audio complete - animation engine will transition to idle
+            // when overlay frames finish
             if self?.state == .animating {
                 self?.state = .connected
             }
@@ -827,7 +770,7 @@ public final class LIVAClient {
 
     private func notifyIdleReady() {
         // Idle animation is fully loaded, animation can start
-        animationEngine?.setBaseFrameManager(baseFrameManager)
+        // New animation engine loads base frames directly via loadAnimation()
 
         // If waiting to connect, proceed now
         if pendingConnect {
@@ -848,9 +791,7 @@ public final class LIVAClient {
     // MARK: - Memory Management
 
     @objc private func handleMemoryWarning() {
-        frameDecoder?.handleMemoryWarning()
-        animationEngine?.clearQueue()
-        // NEW - Reset new engine on memory warning
+        // Reset animation engine on memory warning
         newAnimationEngine?.reset()
     }
 
@@ -871,7 +812,7 @@ public extension LIVAClient {
         LIVAClient:
           State: \(state)
           Connected: \(isConnected)
-          Animation: \(animationEngine?.debugDescription ?? "nil")
+          Animation: \(newAnimationEngine?.getDebugInfo() ?? [:])
           Audio queue: \(audioPlayer?.queuedChunkCount ?? 0)
         """
     }
