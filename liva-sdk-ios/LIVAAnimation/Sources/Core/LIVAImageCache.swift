@@ -345,6 +345,48 @@ class LIVAImageCache {
         }
     }
 
+    /// Check if frame is fully ready for rendering (SINGLE SOURCE OF TRUTH)
+    /// - Parameter key: Image key
+    /// - Returns: True if frame is BOTH cached AND decoded
+    ///
+    /// **This is the authoritative readiness check used throughout the SDK.**
+    /// A frame must be both cached and decoded to be considered ready for rendering.
+    func isFrameReady(forKey key: String) -> Bool {
+        return lock.withLock {
+            let cached = cache.object(forKey: key as NSString) != nil
+            let decoded = decodedKeys.contains(key)
+            return cached && decoded
+        }
+    }
+
+    /// Check if first N frames are ready for rendering (for buffer readiness)
+    /// - Parameters:
+    ///   - keys: Array of frame keys in sequence order
+    ///   - minimumCount: Minimum number of sequential ready frames required
+    /// - Returns: True if at least minimumCount sequential frames from start are ready
+    ///
+    /// **Used to determine if animation can start playing.**
+    /// Frames must be sequentially ready from the beginning (no gaps allowed).
+    func areFirstFramesReady(keys: [String], minimumCount: Int) -> Bool {
+        return lock.withLock {
+            let checkCount = min(keys.count, minimumCount)
+            var readyCount = 0
+
+            for i in 0..<checkCount {
+                let key = keys[i]
+                let cached = cache.object(forKey: key as NSString) != nil
+                let decoded = decodedKeys.contains(key)
+                if cached && decoded {
+                    readyCount += 1
+                } else {
+                    break  // Must be sequential - stop at first gap
+                }
+            }
+
+            return readyCount >= minimumCount
+        }
+    }
+
     /// Evict all images from specified chunks
     /// - Parameter chunkIndices: Set of chunk indices to evict
     func evictChunks(_ chunkIndices: Set<Int>) {
