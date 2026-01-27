@@ -6,6 +6,36 @@ The iOS implementation has several issues that were already fixed in the web fro
 
 ---
 
+## 🚀 Implementation Status (Updated 2026-01-27)
+
+| Phase | Description | Status | Notes |
+|-------|-------------|--------|-------|
+| Phase 1 | Cache Key Migration (overlay_id) | ✅ COMPLETE | Content-based keys now used throughout |
+| Phase 2 | Remove skipFirstAdvance | ✅ COMPLETE | Property removed, logic removed |
+| Phase 2.5 | Per-Frame Animation Name | ✅ COMPLETE | Now uses current frame's animation name |
+| Phase 3 | Decode Readiness Tracking | ⏳ PENDING | Not needed for iOS (UIImage ready on creation) |
+| Phase 4 | Skip-Frame-If-Not-Ready | ⏳ PENDING | May not be needed (testing required) |
+| Phase 5 | Debug Tools | ⏳ OPTIONAL | `frameSyncDebugEnabled` already exists |
+| Phase 6 | Idle Animation Pingpong | ✅ EXISTED | Already implemented in iOS |
+| Phase 7 | Transition Animation Playback | ⏳ PENDING | Critical for smooth animations |
+| Phase 8 | finishingBase/returnTransition Modes | ⏳ PENDING | Critical for smooth animations |
+| Phase 9 | holdingLastFrame for Chunks | ✅ COMPLETE | Added to prevent gaps between chunks |
+| Phase 10 | Idle FPS Optimization | ⏳ OPTIONAL | Low priority |
+
+### Files Modified
+- `LIVAAnimationTypes.swift` - Removed `skipFirstAdvance`, added `holdingLastFrame`, added `getOverlayCacheKey()`
+- `LIVAAnimationEngine.swift` - Removed skipFirstAdvance logic, added holdingLastFrame logic, fixed per-frame animation name, updated cache key usage
+- `LIVAClient.swift` - Updated to use content-based cache keys
+- `Frame.swift` - Added `overlayId` field and `contentBasedCacheKey` computed property
+
+### Next Steps
+1. **TEST**: Build and run iOS app, check logs for `[FRAME_SYNC]` messages
+2. **VERIFY**: Frames should show `✅SYNC` not `❌DESYNC`
+3. **IF ISSUES**: Continue with Phase 3/4 (decode tracking)
+4. **FOR SMOOTH ANIMATIONS**: Implement Phase 7/8 (transition animations)
+
+---
+
 ## Web vs iOS Comparison
 
 This section provides a side-by-side comparison of how the animation playback works in both platforms. The web frontend is the reference implementation (proven working).
@@ -815,20 +845,20 @@ npm run test:ios:e2e      # Run iOS E2E tests
 ## Verification Checklist
 
 ### Cache System
-- [ ] Cache keys use `overlay_id` format (not positional)
-- [ ] `getContentKey(overlayId:)` function exists
-- [ ] All cache lookups use overlay_id
-- [ ] `isImageReady()` checks BOTH existence AND decoded status
+- [x] Cache keys use `overlay_id` format (not positional) ✅ DONE
+- [x] `getOverlayCacheKey(for:)` function exists ✅ DONE
+- [x] All cache lookups use overlay_id ✅ DONE
+- [ ] `isImageReady()` checks BOTH existence AND decoded status (Not needed - UIImage ready on creation)
 
 ### skipFirstAdvance Removal
-- [ ] No `skipFirstAdvance` property in `OverlayState`
-- [ ] No skip logic in `advanceOverlays()`
-- [ ] No `skipFirstAdvance = true` assignments anywhere
+- [x] No `skipFirstAdvance` property in `OverlayState` ✅ DONE
+- [x] No skip logic in `advanceOverlays()` ✅ DONE
+- [x] No `skipFirstAdvance = true` assignments anywhere ✅ DONE
 
 ### Per-Frame Animation Name
-- [ ] `getOverlayDrivenBaseFrame()` reads animation name from CURRENT frame
-- [ ] NOT from `section.frames[0].animationName`
-- [ ] Mid-chunk animation transitions work correctly
+- [x] `getOverlayDrivenBaseFrame()` reads animation name from CURRENT frame ✅ DONE
+- [x] NOT from `section.frames[0].animationName` ✅ DONE
+- [ ] Mid-chunk animation transitions work correctly (NEEDS TESTING)
 
 ### Frame Skip Logic
 - [ ] Draw loop skips frame if overlay not ready
@@ -852,8 +882,8 @@ npm run test:ios:e2e      # Run iOS E2E tests
 - [ ] Transition animation plays when going talking → idle (e.g., `talking_1_e_idle_1_s`)
 - [ ] `finishingBase` mode waits for base animation to complete before return transition
 - [ ] `returnTransition` mode plays the talking→idle transition
-- [ ] `holdingLastFrame` prevents gaps between chunks
-- [ ] No "pop" when entering or exiting talking mode
+- [x] `holdingLastFrame` prevents gaps between chunks ✅ DONE
+- [ ] No "pop" when entering or exiting talking mode (NEEDS Phase 7/8)
 
 ### State Machine
 - [ ] `AnimationMode` enum has: idle, overlay, transition, finishingBase, returnTransition

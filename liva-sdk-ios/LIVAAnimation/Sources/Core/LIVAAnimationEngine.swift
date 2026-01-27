@@ -134,6 +134,13 @@ class LIVAAnimationEngine {
     private var fpsLastUpdateTime: CFTimeInterval = 0
     private var currentFPS: Double = 0.0
 
+    /// Rolling FPS calculation - stores last N frame times for accurate per-frame FPS
+    private var frameTimeHistory: [CFTimeInterval] = []
+    private let fpsHistorySize: Int = 10  // Use last 10 frames for rolling average
+
+    /// Next chunk readiness tracking (prefetch callback system)
+    private var nextChunkReady: [Int: Bool] = [:]
+
     /// Time-based frame advancement (accumulator pattern)
     /// This allows rendering at 60fps while animating at 30fps
     private var idleFrameAccumulator: CFTimeInterval = 0.0
@@ -169,7 +176,8 @@ class LIVAAnimationEngine {
     private let alternateIdleAnimation = "idle_1_e_idle_1_s"
 
     /// Minimum frames needed before starting playback (adaptive buffering)
-    private let minFramesBeforeStart = 10
+    /// Reduced from 10 to 5 to minimize chunk transition delays
+    private let minFramesBeforeStart = 5
 
     /// Maximum wait time for buffer (milliseconds)
     private let maxBufferWaitMs: Int = 3000
@@ -256,6 +264,14 @@ class LIVAAnimationEngine {
         overlayQueue.append(queued)
 
         animLog("[LIVAAnimationEngine] 📦 Enqueued overlay chunk \(chunkIndex), frames: \(frames.count), queue length: \(overlayQueue.count)")
+
+        // PREFETCH CALLBACK: Register callback to know when this chunk's images are fully cached
+        // This prevents blocking at chunk transitions by proactively signaling readiness
+        imageCache.onChunkComplete(chunkIndex: chunkIndex) { [weak self] in
+            guard let self = self else { return }
+            self.nextChunkReady[chunkIndex] = true
+            animLog("[LIVAAnimationEngine] ✅ PREFETCH READY: Chunk \(chunkIndex) images fully cached")
+        }
 
         // Start playback if not already playing
         if !isSetPlaying {
@@ -350,6 +366,11 @@ class LIVAAnimationEngine {
         // Clear audio state
         pendingAudioChunks.removeAll()
         audioStartedForChunk.removeAll()
+        // Clear prefetch tracking
+        nextChunkReady.removeAll()
+        // Clear FPS history for fresh calculation
+        frameTimeHistory.removeAll()
+        currentFPS = 0.0
 
         animLog("[LIVAAnimationEngine] 🔄 Reset to idle")
     }
@@ -380,6 +401,12 @@ class LIVAAnimationEngine {
         // Clear pending audio data (new message = new audio)
         pendingAudioChunks.removeAll()
         audioStartedForChunk.removeAll()
+
+        // Clear prefetch tracking
+        nextChunkReady.removeAll()
+        // Clear FPS history for fresh calculation
+        frameTimeHistory.removeAll()
+        currentFPS = 0.0
 
         animLog("[LIVAAnimationEngine] 🔄 forceIdleNow - cleared all caches, state, and audio")
     }
@@ -414,10 +441,23 @@ class LIVAAnimationEngine {
             idleFrameAccumulator += deltaTime
         }
 
-        // FPS tracking - measure animation frames, not render frames
+        // FPS tracking - ROLLING AVERAGE for real-time accuracy
+        // Store frame delta in history
+        frameTimeHistory.append(deltaTime)
+        if frameTimeHistory.count > fpsHistorySize {
+            frameTimeHistory.removeFirst()
+        }
+
+        // Calculate rolling FPS from recent frame times (only when we have enough data)
+        if frameTimeHistory.count >= 3 {
+            let totalTime = frameTimeHistory.reduce(0, +)
+            let avgFrameTime = totalTime / Double(frameTimeHistory.count)
+            currentFPS = avgFrameTime > 0 ? 1.0 / avgFrameTime : 0.0
+        }
+
+        // Also keep the per-second animation frame count for logging
         let fpsDelta = now - fpsLastUpdateTime
         if fpsDelta >= 1.0 {
-            currentFPS = Double(animationFrameCount) / fpsDelta
             animationFrameCount = 0
             fpsLastUpdateTime = now
         }
@@ -761,19 +801,29 @@ class LIVAAnimationEngine {
                     // JITTER FIX: Before marking done, check if next chunk buffer is ready
                     if !overlayQueue.isEmpty {
                         let nextChunk = overlayQueue.first!
-                        if !isBufferReady(nextChunk.section) {
+                        let nextChunkIndex = nextChunk.section.chunkIndex
+
+                        // FAST PATH: Check prefetch callback flag first (avoids polling)
+                        let isPrefetchReady = nextChunkReady[nextChunkIndex] == true
+
+                        // SLOW PATH: If prefetch not ready, check minimum buffer
+                        let isMinBufferReady = isPrefetchReady || isBufferReady(nextChunk.section)
+
+                        if !isMinBufferReady {
                             // Buffer NOT ready - hold at last frame
                             state.holdingLastFrame = true
                             overlayStates[index] = state
-                            animLog("[LIVAAnimationEngine] ⏸️ HOLDING: Chunk \(section.chunkIndex) waiting for next chunk buffer")
+                            animLog("[LIVAAnimationEngine] ⏸️ HOLDING: Chunk \(section.chunkIndex) waiting for chunk \(nextChunkIndex) buffer (prefetch=\(isPrefetchReady))")
                             continue
                         }
                     }
 
-                    // Buffer ready (or no more chunks) - mark done
+                    // Buffer ready (or no more chunks) - mark done and cleanup
                     state.playing = false
                     state.done = true
                     state.holdingLastFrame = false
+                    // Clear prefetch flag for current chunk (memory cleanup)
+                    nextChunkReady.removeValue(forKey: section.chunkIndex)
                     animLog("[LIVAAnimationEngine] ✅ Overlay chunk \(section.chunkIndex) finished")
                 } else {
                     // Not last frame - advance normally
@@ -862,6 +912,9 @@ class LIVAAnimationEngine {
         // Clear audio state (chunks complete)
         pendingAudioChunks.removeAll()
         audioStartedForChunk.removeAll()
+
+        // Clear prefetch tracking
+        nextChunkReady.removeAll()
 
         // Notify delegate that all chunks finished
         DispatchQueue.main.async { [weak self] in

@@ -92,14 +92,17 @@ struct OverlayState {
     /// Has audio been started for this section?
     var audioStarted: Bool = false
 
-    /// Skip first frame advance for sync (set when starting)
-    var skipFirstAdvance: Bool = true
+    // NOTE: skipFirstAdvance REMOVED - was causing frame 0 to draw twice (jitter bug)
+    // The getOverlayDrivenBaseFrame() already handles synchronization correctly.
 
     /// When playback started (for time-based advancement)
     var startTime: CFTimeInterval?
 
     /// When section was created (for fallback timing)
     var createdAt: CFTimeInterval = CACurrentMediaTime()
+
+    /// Holding at last frame waiting for next chunk buffer (JITTER FIX)
+    var holdingLastFrame: Bool = false
 }
 
 // MARK: - Queued Overlay
@@ -147,12 +150,24 @@ extension Array {
 
 // MARK: - Cache Key Helper
 
-/// Generate cache key for overlay frame
+/// Generate cache key for overlay frame - PREFERS overlayId (content-based) over positional key
 /// - Parameters:
-///   - chunkIndex: Chunk index
-///   - sectionIndex: Section index
-///   - sequenceIndex: Sequence index (position in frames array)
-/// - Returns: Cache key string (format: "chunk_section_sequence")
+///   - frame: The overlay frame containing overlayId
+///   - chunkIndex: Chunk index (fallback only)
+///   - sectionIndex: Section index (fallback only)
+///   - sequenceIndex: Sequence index (fallback only)
+/// - Returns: Cache key string (overlayId if available, else "chunk_section_sequence")
+func getOverlayCacheKey(for frame: OverlayFrame, chunkIndex: Int, sectionIndex: Int, sequenceIndex: Int) -> String {
+    // CONTENT-BASED CACHING: Use overlayId when available (matches web behavior)
+    // This prevents wrong images if cache isn't cleared between messages
+    if let overlayId = frame.overlayId, !overlayId.isEmpty {
+        return overlayId
+    }
+    // Fallback to positional key
+    return "\(chunkIndex)_\(sectionIndex)_\(sequenceIndex)"
+}
+
+/// Legacy positional key generator (deprecated - prefer getOverlayCacheKey)
 func getOverlayKey(chunkIndex: Int, sectionIndex: Int, sequenceIndex: Int) -> String {
     return "\(chunkIndex)_\(sectionIndex)_\(sequenceIndex)"
 }
