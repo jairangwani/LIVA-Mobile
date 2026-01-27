@@ -531,10 +531,12 @@ class LIVAAnimationEngine {
         }
 
         // 2. Collect overlay images to draw
+        // PHASE 4: Skip-Draw-on-Wait - if overlay not decoded, hold previous frame
         let cacheLookupStart = CACurrentMediaTime()
         var overlaysToRender: [(image: UIImage, frame: CGRect)] = []
         var overlayKey: String? = nil
         var hasOverlayImage: Bool = false
+        var shouldSkipFrameAdvance: Bool = false  // PHASE 4: Skip advance if overlay not ready
 
         if mode == .overlay {
             for (index, section) in overlaySections.enumerated() {
@@ -555,7 +557,20 @@ class LIVAAnimationEngine {
                 )
                 overlayKey = key
 
-                if let overlayImage = imageCache.getImage(forKey: key) {
+                // PHASE 4: Check if overlay is DECODED (not just cached)
+                let isOverlayDecoded = imageCache.isImageDecoded(forKey: key)
+
+                if !isOverlayDecoded {
+                    // SKIP THIS FRAME - hold previous frame
+                    // Don't advance overlay counters (will be skipped in advanceOverlays)
+                    shouldSkipFrameAdvance = true
+                    hasOverlayImage = false
+
+                    // Log skip (but not every frame to avoid spam)
+                    if drawCallCount % 30 == 0 {
+                        animLog("[LIVAAnimationEngine] ⏸️ SKIP-DRAW: Overlay not decoded, holding previous frame. key=\(key), drawFrame=\(state.currentDrawingFrame)")
+                    }
+                } else if let overlayImage = imageCache.getImage(forKey: key) {
                     overlaysToRender.append((overlayImage, overlayFrame.coordinates))
                     hasOverlayImage = true
 
@@ -566,6 +581,7 @@ class LIVAAnimationEngine {
                 } else {
                     // Missing overlay frame - log warning every frame when missing
                     hasOverlayImage = false
+                    shouldSkipFrameAdvance = true  // Also skip if image missing
                     animLog("[LIVAAnimationEngine] ⚠️ MISSING overlay: key=\(key), drawFrame=\(state.currentDrawingFrame), seqIndex=\(overlayFrame.sequenceIndex), cacheCount=\(imageCache.count)")
                 }
             }
@@ -694,7 +710,13 @@ class LIVAAnimationEngine {
 
         // 4. Advance frame counters
         if mode == .overlay {
-            advanceOverlays()
+            // PHASE 4: Skip-Draw-on-Wait - don't advance if overlay not decoded
+            if !shouldSkipFrameAdvance {
+                advanceOverlays()
+            } else {
+                // Still accumulate time but don't advance (will catch up next frame)
+                // This prevents desync while waiting for decode
+            }
             cleanupOverlays()
         } else if mode == .idle {
             advanceIdleFrame()
@@ -751,6 +773,7 @@ class LIVAAnimationEngine {
     }
 
     /// Check if first overlay frame is ready to play
+    /// PHASE 3: Must be DECODED, not just cached (matches web frontend behavior)
     private func isFirstOverlayFrameReady(_ section: OverlaySection) -> Bool {
         guard let firstFrame = section.frames.first else { return false }
 
@@ -762,11 +785,14 @@ class LIVAAnimationEngine {
             sequenceIndex: 0
         )
 
+        // Check BOTH cached AND decoded (not just hasImage)
         let hasImage = imageCache.hasImage(forKey: key)
-        if !hasImage && drawCallCount % 100 == 1 {
-            animLog("[LIVAAnimationEngine] ❌ First frame not ready, key: \(key), cache count: \(imageCache.count)")
+        let isDecoded = imageCache.isImageDecoded(forKey: key)
+
+        if (!hasImage || !isDecoded) && drawCallCount % 100 == 1 {
+            animLog("[LIVAAnimationEngine] ❌ First frame not ready, key: \(key), hasImage: \(hasImage), isDecoded: \(isDecoded), cache count: \(imageCache.count)")
         }
-        return hasImage
+        return hasImage && isDecoded
     }
 
     /// Get base frame count for animation
@@ -774,7 +800,33 @@ class LIVAAnimationEngine {
         if let expectedCount = expectedFrameCounts[animationName] {
             return expectedCount
         }
-        return animationFrames[animationName]?.count ?? 1
+
+        // Check if animation is loaded
+        if let loadedFrames = animationFrames[animationName] {
+            return loadedFrames.count
+        }
+
+        // ANIMATION NOT LOADED - this will cause frame skipping!
+        // Log this for debugging
+        animLog("[LIVAAnimationEngine] ⚠️ MISSING BASE ANIMATION: \(animationName) - will cause frame skipping!")
+        LIVASessionLogger.shared.logEvent("MISSING_BASE_ANIM", details: [
+            "animation": animationName,
+            "loaded_anims": Array(animationFrames.keys)
+        ])
+
+        // Return 1 as fallback (will cause all frames to map to 0)
+        return 1
+    }
+
+    /// Check if all required animations for a chunk are loaded
+    func hasRequiredAnimations(for frames: [OverlayFrame]) -> Bool {
+        let requiredAnims = Set(frames.map { $0.animationName })
+        for anim in requiredAnims {
+            if animationFrames[anim] == nil && expectedFrameCounts[anim] == nil {
+                return false
+            }
+        }
+        return true
     }
 
     // MARK: - Frame Advancement
@@ -1023,6 +1075,8 @@ class LIVAAnimationEngine {
     }
 
     /// Check if enough frames are ready to start playback (adaptive buffering)
+    /// PHASE 3: Uses isImageDecoded() to ensure images are fully decoded, not just cached
+    /// This matches web frontend's behavior where buffer readiness checks img._decoded flag
     private func isBufferReady(_ section: OverlaySection) -> Bool {
         guard !section.frames.isEmpty else { return false }
 
@@ -1041,10 +1095,12 @@ class LIVAAnimationEngine {
                 sequenceIndex: i
             )
 
-            if imageCache.hasImage(forKey: key) {
+            // Check BOTH cached AND decoded (not just hasImage)
+            // Image must be fully decoded to be render-ready
+            if imageCache.hasImage(forKey: key) && imageCache.isImageDecoded(forKey: key) {
                 readyCount += 1
             } else {
-                break // Stop at first missing frame
+                break // Stop at first not-ready frame
             }
         }
 

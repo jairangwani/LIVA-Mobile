@@ -13,8 +13,8 @@ The iOS implementation has several issues that were already fixed in the web fro
 | Phase 1 | Cache Key Migration (overlay_id) | ✅ COMPLETE | Content-based keys now used throughout |
 | Phase 2 | Remove skipFirstAdvance | ✅ COMPLETE | Property removed, logic removed |
 | Phase 2.5 | Per-Frame Animation Name | ✅ COMPLETE | Now uses current frame's animation name |
-| Phase 3 | Decode Readiness Tracking | ⏳ PENDING | Not needed for iOS (UIImage ready on creation) |
-| Phase 4 | Skip-Frame-If-Not-Ready | ⏳ PENDING | May not be needed (testing required) |
+| Phase 3 | Decode Readiness Tracking | ✅ COMPLETE | `decodedKeys` in LIVAImageCache, `isImageDecoded()` method |
+| Phase 4 | Skip-Frame-If-Not-Ready | ✅ COMPLETE | `shouldSkipFrameAdvance` flag in LIVAAnimationEngine |
 | Phase 5 | Debug Tools | ⏳ OPTIONAL | `frameSyncDebugEnabled` already exists |
 | Phase 6 | Idle Animation Pingpong | ✅ EXISTED | Already implemented in iOS |
 | Phase 7 | Transition Animation Playback | ⏳ PENDING | Critical for smooth animations |
@@ -28,11 +28,19 @@ The iOS implementation has several issues that were already fixed in the web fro
 - `LIVAClient.swift` - Updated to use content-based cache keys
 - `Frame.swift` - Added `overlayId` field and `contentBasedCacheKey` computed property
 
+### Async Frame Processing (2026-01-27)
+
+In addition to the overlay fixes, async frame processing was implemented to eliminate main thread blocking:
+- Batched processing with yields (15 frames/batch)
+- Decode tracking (`decodedKeys: Set<String>`)
+- Skip-draw-on-wait (hold previous frame if overlay not decoded)
+- Chunk synchronization (defer chunk_ready if batches pending)
+
+See [IOS_ASYNC_PROCESSING_PLAN.md](IOS_ASYNC_PROCESSING_PLAN.md) for full details.
+
 ### Next Steps
-1. **TEST**: Build and run iOS app, check logs for `[FRAME_SYNC]` messages
-2. **VERIFY**: Frames should show `✅SYNC` not `❌DESYNC`
-3. **IF ISSUES**: Continue with Phase 3/4 (decode tracking)
-4. **FOR SMOOTH ANIMATIONS**: Implement Phase 7/8 (transition animations)
+1. **FOR SMOOTH ANIMATIONS**: Implement Phase 7/8 (transition animations)
+2. **OPTIONAL**: Phase 10 (Idle FPS optimization)
 
 ---
 

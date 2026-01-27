@@ -89,6 +89,16 @@ public final class LIVAClient {
     private var pendingOverlayFrames: [Int: [OverlayFrame]] = [:]
     private var chunkAnimationNames: [Int: String] = [:]
 
+    // PHASE 1 & 5: Batched processing with yields
+    /// Track pending batch operations per chunk (for async batch processing)
+    private var pendingBatchCount: [Int: Int] = [:]
+    /// Deferred chunk ready signals (when batches are still processing)
+    private var deferredChunkReady: [Int: Int] = [:]  // chunkIndex -> totalSent
+    /// Lock for batch tracking state
+    private let batchTrackingLock = NSLock()
+    /// Batch size for frame processing (matches web frontend's 15)
+    private let frameBatchSize = 15
+
     // MARK: - Public Methods
 
     /// Configure the SDK with connection parameters
@@ -182,6 +192,12 @@ public final class LIVAClient {
         pendingOverlayPositions.removeAll()
         pendingOverlayFrames.removeAll()
         chunkAnimationNames.removeAll()
+
+        // PHASE 5: Clear batch tracking state
+        batchTrackingLock.lock()
+        pendingBatchCount.removeAll()
+        deferredChunkReady.removeAll()
+        batchTrackingLock.unlock()
 
         // Update state if we were animating
         if state == .animating {
@@ -334,6 +350,7 @@ public final class LIVAClient {
         let chunkIndex = frameBatch.chunkIndex
         let batchIndex = frameBatch.batchIndex
         let frameCount = frameBatch.frames.count
+        let frames = frameBatch.frames
 
         clientLog("[LIVAClient] 📥 handleFrameBatchReceived: chunk=\(chunkIndex), batch=\(batchIndex), frames=\(frameCount)")
 
@@ -343,50 +360,53 @@ public final class LIVAClient {
             pendingOverlayFrames[chunkIndex]?.reserveCapacity(120) // Typical chunk size
         }
 
-        // OPTIMIZED: Pre-allocate array and cache engine reference
-        var newFrames: [OverlayFrame] = []
-        newFrames.reserveCapacity(frameCount)
-        let engine = newAnimationEngine // Cache to avoid optional unwrap in loop
-        var animName: String? = nil
+        // PHASE 1 & 5: Increment pending batch count (track async processing)
+        batchTrackingLock.lock()
+        pendingBatchCount[chunkIndex, default: 0] += 1
+        batchTrackingLock.unlock()
 
-        // OPTIMIZED LOOP: Minimal work per iteration
-        for frame in frameBatch.frames {
-            let contentKey = frame.contentBasedCacheKey
+        // Cache engine reference once
+        let engine = newAnimationEngine
 
-            // ASYNC: Decode image on background (just dispatch, no completion closure overhead)
-            engine?.processAndCacheOverlayImageAsync(
-                base64Data: frame.imageData,
-                key: contentKey,
-                chunkIndex: chunkIndex,
-                completion: nil  // Skip completion to reduce overhead
-            )
-
-            // Track first non-empty animation name
-            if animName == nil && !frame.animationName.isEmpty {
-                animName = frame.animationName
-            }
-
-            // Build OverlayFrame (struct copy is fast)
-            newFrames.append(OverlayFrame(
-                matchedSpriteFrameNumber: frame.matchedSpriteFrameNumber,
-                sheetFilename: frame.sheetFilename,
-                coordinates: .zero,
-                imageData: nil,
-                sequenceIndex: frame.sequenceIndex,
-                animationName: frame.animationName,
-                originalFrameIndex: frame.frameIndex,
-                overlayId: contentKey,
-                char: frame.char,
-                viseme: nil
-            ))
+        // PHASE 1: Process FIRST frame immediately (critical for playback start)
+        // This ensures the first overlay is available ASAP for buffer readiness check
+        if let firstFrame = frames.first {
+            processFrameMetadata(firstFrame, chunkIndex: chunkIndex, engine: engine)
         }
 
-        // Batch append (single array operation instead of N appends)
-        pendingOverlayFrames[chunkIndex]?.append(contentsOf: newFrames)
+        // PHASE 1: Process remaining frames in batches with yields to event loop
+        // This matches web frontend's pattern: setTimeout(0) between batches
+        if frames.count > 1 {
+            var currentIndex = 1
 
-        // Set animation name once
-        if let animName = animName, chunkAnimationNames[chunkIndex] == nil {
-            chunkAnimationNames[chunkIndex] = animName
+            func processNextBatch() {
+                let endIndex = min(currentIndex + self.frameBatchSize, frames.count)
+
+                // Process batch of frames
+                for i in currentIndex..<endIndex {
+                    self.processFrameMetadata(frames[i], chunkIndex: chunkIndex, engine: engine)
+                }
+
+                currentIndex = endIndex
+
+                // If more frames, yield to run loop then continue
+                if currentIndex < frames.count {
+                    DispatchQueue.main.async {
+                        processNextBatch()
+                    }
+                } else {
+                    // Batch complete - decrement pending count and check for deferred chunk ready
+                    self.onBatchComplete(chunkIndex: chunkIndex)
+                }
+            }
+
+            // Start batch processing after yielding to run loop
+            DispatchQueue.main.async {
+                processNextBatch()
+            }
+        } else {
+            // Only one frame - mark batch complete immediately
+            onBatchComplete(chunkIndex: chunkIndex)
         }
 
         // Also store for legacy engine (old path)
@@ -399,7 +419,77 @@ public final class LIVAClient {
         }
     }
 
+    /// Process a single frame's metadata and queue async image decode
+    /// PHASE 1: Extracted for batched processing
+    private func processFrameMetadata(_ frame: LIVASocketManager.FrameData, chunkIndex: Int, engine: LIVAAnimationEngine?) {
+        let contentKey = frame.contentBasedCacheKey
+
+        // ASYNC: Decode image on background (just dispatch, no completion closure overhead)
+        engine?.processAndCacheOverlayImageAsync(
+            base64Data: frame.imageData,
+            key: contentKey,
+            chunkIndex: chunkIndex,
+            completion: nil  // Skip completion to reduce overhead
+        )
+
+        // Build OverlayFrame (struct copy is fast)
+        let overlayFrame = OverlayFrame(
+            matchedSpriteFrameNumber: frame.matchedSpriteFrameNumber,
+            sheetFilename: frame.sheetFilename,
+            coordinates: .zero,
+            imageData: nil,
+            sequenceIndex: frame.sequenceIndex,
+            animationName: frame.animationName,
+            originalFrameIndex: frame.frameIndex,
+            overlayId: contentKey,
+            char: frame.char,
+            viseme: nil
+        )
+
+        // Append to pending frames
+        pendingOverlayFrames[chunkIndex]?.append(overlayFrame)
+
+        // Track animation name
+        if !frame.animationName.isEmpty && chunkAnimationNames[chunkIndex] == nil {
+            chunkAnimationNames[chunkIndex] = frame.animationName
+        }
+    }
+
+    /// PHASE 5: Called when a batch finishes processing
+    /// Decrements pending count and processes deferred chunk_ready if all batches done
+    private func onBatchComplete(chunkIndex: Int) {
+        batchTrackingLock.lock()
+        pendingBatchCount[chunkIndex, default: 1] -= 1
+        let remaining = pendingBatchCount[chunkIndex] ?? 0
+        let deferredTotal = remaining == 0 ? deferredChunkReady.removeValue(forKey: chunkIndex) : nil
+        batchTrackingLock.unlock()
+
+        // If all batches done and chunk_ready was deferred, process it now
+        if let totalSent = deferredTotal {
+            clientLog("[LIVAClient] ✅ All batches complete for chunk \(chunkIndex), processing deferred chunk_ready")
+            processChunkReady(chunkIndex: chunkIndex, totalSent: totalSent)
+        }
+    }
+
     private func handleChunkReady(chunkIndex: Int, totalSent: Int) {
+        // PHASE 5: Check if batches are still processing
+        batchTrackingLock.lock()
+        let pendingCount = pendingBatchCount[chunkIndex, default: 0]
+        if pendingCount > 0 {
+            // Batches still processing - defer chunk_ready
+            deferredChunkReady[chunkIndex] = totalSent
+            batchTrackingLock.unlock()
+            clientLog("[LIVAClient] ⏳ Deferring chunk_ready for chunk \(chunkIndex) - \(pendingCount) batches still processing")
+            return
+        }
+        batchTrackingLock.unlock()
+
+        // All batches done - process chunk_ready
+        processChunkReady(chunkIndex: chunkIndex, totalSent: totalSent)
+    }
+
+    /// Process chunk ready (extracted for deferred processing)
+    private func processChunkReady(chunkIndex: Int, totalSent: Int) {
         // Get all frames for this chunk (legacy engine)
         let legacyFrames = currentChunkFrames[chunkIndex] ?? []
 
@@ -491,6 +581,12 @@ public final class LIVAClient {
         pendingOverlayPositions.removeValue(forKey: chunkIndex)
         pendingOverlayFrames.removeValue(forKey: chunkIndex)
         chunkAnimationNames.removeValue(forKey: chunkIndex)
+
+        // PHASE 5: Clean up batch tracking
+        batchTrackingLock.lock()
+        pendingBatchCount.removeValue(forKey: chunkIndex)
+        deferredChunkReady.removeValue(forKey: chunkIndex)
+        batchTrackingLock.unlock()
     }
 
     private func handleAudioEnd() {

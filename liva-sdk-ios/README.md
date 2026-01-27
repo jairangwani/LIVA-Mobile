@@ -151,10 +151,26 @@ enum LIVAState {
 - Callbacks are dispatched on the main thread
 - Frame decoding happens on background queues
 
+## Performance
+
+The SDK uses async frame processing to maintain 30fps animation:
+
+- **Frame processing:** Batched with main thread yields (15 frames/batch)
+- **Decode tracking:** Images marked ready only after full decode
+- **Skip-draw-on-wait:** Holds previous frame if overlay not decoded
+
+**Measured Performance (2026-01-27):**
+- 33.3ms average frame delta (30fps)
+- 98.5% frames within 28-40ms target range
+- Zero freezes on cold start
+- Chunk transitions: 74-213ms (improved from 100-300ms)
+
 ## Memory Management
 
 The SDK automatically manages memory:
-- Frame cache limited to ~100 frames
+- Base animations: ~50-100 MB (depends on agent)
+- Overlay cache: ~200 MB (2000 images max)
+- Peak usage: ~250-300 MB during playback
 - Automatic cleanup after playback
 - Responds to memory warnings
 

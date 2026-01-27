@@ -154,6 +154,23 @@ LIVAAnimation.connect(
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Async Frame Processing (2026-01-27)
+
+Frame batches arrive from socket (30-60 frames at once). To prevent main thread blocking:
+
+1. **First frame:** Processed immediately (synchronous) to enable buffer readiness check
+2. **Remaining frames:** Batched processing (15 frames/batch) with `DispatchQueue.main.async` yields
+3. **Decode tracking:** `LIVAImageCache` tracks which images are fully decoded via `decodedKeys`
+4. **Skip-draw:** If overlay not decoded, hold previous frame (don't advance counter)
+5. **Chunk sync:** Defer `chunk_ready` processing if batches still running
+
+This approach matches web frontend's pattern and eliminates frame arrival freezes.
+
+**Key implementation files:**
+- `LIVAClient.swift` - `handleFrameBatchReceived()`, `onBatchComplete()`
+- `LIVAImageCache.swift` - `isImageDecoded(forKey:)`
+- `LIVAAnimationEngine.swift` - `shouldSkipFrameAdvance`
+
 ## Memory Management
 
 ### iOS (Swift)

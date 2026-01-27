@@ -251,6 +251,56 @@ DESYNC errors:  0
 
 ---
 
+---
+
+## iOS Async Frame Processing (2026-01-27)
+
+### Overview
+
+The iOS SDK implements batched async frame processing to prevent main thread blocking during overlay frame arrival. This matches the web frontend's approach and eliminates freezing during playback.
+
+### Architecture
+
+**Batched Processing with Yields:**
+- First frame processed immediately (synchronous) for buffer readiness check
+- Remaining frames processed in batches of 15 with `DispatchQueue.main.async` yields
+- Matches web frontend's `setTimeout(0)` pattern
+
+**Decode Tracking:**
+- `LIVAImageCache` tracks which images are fully decoded via `decodedKeys: Set<String>`
+- `isImageDecoded(forKey:)` distinguishes "cached" from "render-ready"
+- Buffer readiness checks both cached AND decoded status
+
+**Skip-Draw-on-Wait:**
+- When overlay not decoded, animation holds previous frame
+- Frame counter doesn't advance on skip
+- Prevents visual desync during async decoding
+
+**Chunk Synchronization:**
+- `pendingBatchCount` tracks async batch operations per chunk
+- `chunk_ready` processing deferred if batches still running
+- Processed when all batches complete
+
+### Performance Results
+
+- **Cold start:** 0 freezes (was 4-5 @ 100-300ms each)
+- **Frame timing:** 33.3ms average (perfect 30fps), 98.5% within target range
+- **Warm start:** Occasional 74-213ms freezes at chunk transitions (improvement from 100-300ms)
+
+### Key Files
+
+- `LIVAImageCache.swift` - Decode tracking (`decodedKeys`, `isImageDecoded()`)
+- `LIVAAnimationEngine.swift` - Skip-draw, buffer readiness (`shouldSkipFrameAdvance`)
+- `LIVAClient.swift` - Batched processing, chunk synchronization (`pendingBatchCount`, `deferredChunkReady`)
+
+### Debugging
+
+Missing animations will cause frame skipping. Check for `MISSING_BASE_ANIM` events in logs. Ensure all animations load before sending first message (~30-40 seconds after app start).
+
+See: [docs/IOS_ASYNC_PROCESSING_PLAN.md](docs/IOS_ASYNC_PROCESSING_PLAN.md) for full implementation details.
+
+---
+
 ## Architecture Reference
 
 See main docs: [../CLAUDE.md](../CLAUDE.md)

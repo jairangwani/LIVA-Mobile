@@ -19,6 +19,11 @@ class LIVAImageCache {
     /// Track which images belong to which chunk for batch eviction
     private var chunkImageKeys: [Int: Set<String>] = [:]
 
+    /// Track which images are fully decoded (not just cached)
+    /// This distinguishes between "in cache" and "ready to render"
+    /// Web frontend uses similar pattern with img._decoded flag
+    private var decodedKeys: Set<String> = []
+
     /// Lock for thread-safe access (minimal locking for cache operations)
     private let lock = NSLock()
 
@@ -125,6 +130,11 @@ class LIVAImageCache {
             // Store in cache (fast - minimal lock time)
             self.setImageInternal(image, forKey: key, chunkIndex: chunkIndex)
 
+            // Mark as decoded (image is fully ready for rendering)
+            self.lock.lock()
+            self.decodedKeys.insert(key)
+            self.lock.unlock()
+
             // Decrement pending and check if chunk is complete
             self.decrementPendingAndNotify(chunkIndex: chunkIndex)
 
@@ -224,6 +234,17 @@ class LIVAImageCache {
         return cache.object(forKey: key as NSString) != nil
     }
 
+    /// Check if image is fully decoded and ready for rendering
+    /// This is the key distinction from hasImage() - an image may be in cache
+    /// but not yet fully decoded (race condition during async processing)
+    /// - Parameter key: Image key
+    /// - Returns: True if image is decoded and ready for rendering
+    func isImageDecoded(forKey key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return decodedKeys.contains(key)
+    }
+
     /// Evict all images from specified chunks
     /// - Parameter chunkIndices: Set of chunk indices to evict
     func evictChunks(_ chunkIndices: Set<Int>) {
@@ -237,6 +258,7 @@ class LIVAImageCache {
 
             for key in imageKeys {
                 cache.removeObject(forKey: key as NSString)
+                decodedKeys.remove(key)  // Also remove from decoded tracking
                 totalEvicted += 1
             }
 
@@ -255,6 +277,7 @@ class LIVAImageCache {
 
         cache.removeAllObjects()
         chunkImageKeys.removeAll()
+        decodedKeys.removeAll()  // Clear decode tracking
 
         #if DEBUG
         print("[LIVAImageCache] Cleared all cached images")

@@ -251,6 +251,68 @@ LIVADebugLog.shared.log("[ComponentName] Your message here")
 
 ---
 
+## Performance Debugging
+
+### Frame Timing Analysis
+
+Use the test script to check frame timing:
+
+```bash
+cd /Users/jairangwani/Desktop/LIVA_CODE/LIVA-TESTS
+./scripts/ios-test.sh "Test message"
+
+# Analyze frame timing from logs
+SESSION=$(ls -t logs/sessions | grep _ios | head -1)
+grep "IOS" logs/sessions/$SESSION/frames.log | tail -200 | awk -F'|' '
+{
+  if (NR > 1) {
+    delta = $1 - prev_ts
+    if (delta > 0) {
+      total += delta
+      count++
+      if (delta >= 28 && delta <= 40) target++
+    }
+  }
+  prev_ts = $1
+}
+END {
+  print "Average frame delta: " total/count "ms"
+  print "Target range (28-40ms): " (target/count*100) "%"
+}'
+```
+
+Expected results:
+- Average frame delta: 33-34ms (30fps)
+- 95%+ frames within 28-40ms range
+- Occasional slow frames (<2%) at chunk transitions
+
+### Missing Animation Detection
+
+If frames are being skipped, check for `MISSING_BASE_ANIM` events:
+
+```bash
+SESSION=$(ls -t logs/sessions | grep _ios | head -1)
+grep "MISSING_BASE_ANIM" logs/sessions/$SESSION/events.log
+```
+
+Solution: Wait ~30-40 seconds after app start for all animations to load before sending messages.
+
+### Freeze Detection
+
+Freezes > 50ms are automatically logged as `FREEZE_DETECTED` events:
+
+```bash
+SESSION=$(ls -t logs/sessions | grep _ios | head -1)
+grep "FREEZE_DETECTED" logs/sessions/$SESSION/events.log
+```
+
+Common causes:
+- Large frame batches arriving during playback (solved by async processing)
+- Missing base animations causing frame skipping
+- Memory pressure triggering cache evictions
+
+---
+
 ## Related Files
 
 - **SDK Source**: `liva-sdk-ios/LIVAAnimation/Sources/Core/`
