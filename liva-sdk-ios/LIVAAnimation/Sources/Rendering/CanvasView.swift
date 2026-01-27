@@ -12,12 +12,6 @@ public class LIVACanvasView: UIView {
 
     // MARK: - Properties
 
-    /// Animation engine that provides frames
-    weak var animationEngine: AnimationEngine?
-
-    /// Base frame manager for idle animations
-    private weak var baseFrameManager: BaseFrameManager?
-
     /// Current base frame image
     private var baseFrame: UIImage?
 
@@ -43,9 +37,6 @@ public class LIVACanvasView: UIView {
     private var contentOffset: CGPoint = .zero
 
     // MARK: - Performance
-
-    /// Metal layer for hardware acceleration (iOS 13+)
-    private var metalLayer: CAMetalLayer?
 
     /// Use Core Animation for compositing
     private var baseImageLayer: CALayer?
@@ -357,7 +348,7 @@ public class LIVACanvasView: UIView {
     }
 
     private func drawDebugInfo(in context: CGContext, rect: CGRect) {
-        let debugText = String(format: "FPS: %.1f | Frames: %d", currentFPS, animationEngine?.queuedFrameCount ?? 0)
+        let debugText = String(format: "FPS: %.1f | Frame: %d", currentFPS, frameCount)
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 12, weight: .medium),
@@ -388,20 +379,6 @@ public class LIVACanvasView: UIView {
         }
     }
 
-    /// Update the overlay frame (legacy method - single overlay)
-    func setOverlayFrame(_ image: UIImage?, at position: CGPoint) {
-        if let image = image {
-            overlayFrames = [(image, CGRect(origin: position, size: image.size))]
-        } else {
-            overlayFrames = []
-        }
-        if useLayerRendering {
-            renderWithLayers()
-        } else {
-            setNeedsDisplay()
-        }
-    }
-
     /// Render frame with base + multiple overlays (NEW - used by LIVAAnimationEngine)
     /// - Parameters:
     ///   - base: Base animation frame
@@ -422,16 +399,6 @@ public class LIVACanvasView: UIView {
         // Log slow renders (> 5ms)
         if elapsed > 0.005 {
             print("[CanvasView] ⏱️ Slow render: \(String(format: "%.2f", elapsed * 1000))ms, overlays=\(overlays.count)")
-        }
-    }
-
-    /// Set the base frame manager for idle animations
-    func setBaseFrameManager(_ manager: BaseFrameManager?) {
-        baseFrameManager = manager
-
-        // Show first idle frame immediately if available
-        if let firstFrame = manager?.getCurrentIdleFrame() {
-            setBaseFrame(firstFrame)
         }
     }
 
