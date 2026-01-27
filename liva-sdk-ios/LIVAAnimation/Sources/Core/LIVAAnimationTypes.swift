@@ -192,3 +192,34 @@ func getOverlayCacheKey(for frame: OverlayFrame, chunkIndex: Int, sectionIndex: 
     )
 }
 
+// MARK: - Image Decompression Helper
+
+/// Force image decompression on background thread to prevent render thread blocking
+/// - Parameter rawImage: Image to decompress
+/// - Returns: Decompressed image ready for rendering
+///
+/// **Performance:**
+/// - iOS 15+: Uses optimized `preparingForDisplay()` API
+/// - iOS 14-: Falls back to bitmap context drawing
+///
+/// **Why needed:**
+/// UIImage is lazily decoded. First draw triggers expensive decompression on render thread.
+/// Pre-decompressing on background prevents frame drops during animation.
+///
+/// **Usage:** Call from background queue before caching or rendering
+func forceImageDecompression(_ rawImage: UIImage) -> UIImage {
+    if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
+        // iOS 15+ has optimized pre-rendering (faster than bitmap context)
+        return prepared
+    } else {
+        // Fallback: draw to bitmap context to force decompression
+        let size = rawImage.size
+        let scale = rawImage.scale
+        UIGraphicsBeginImageContextWithOptions(size, false, scale)
+        rawImage.draw(in: CGRect(origin: .zero, size: size))
+        let decompressed = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
+        UIGraphicsEndImageContext()
+        return decompressed
+    }
+}
+

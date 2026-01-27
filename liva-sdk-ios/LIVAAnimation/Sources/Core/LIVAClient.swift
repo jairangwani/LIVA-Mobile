@@ -800,16 +800,8 @@ public final class LIVAClient {
         // CRITICAL: Force image decompression when receiving base frames
         // UIImage defers JPEG/PNG decompression until first draw, which
         // causes freezes during animation. Pre-decode so base frames are
-        // ready to render immediately.
-        let image: UIImage
-        if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
-            image = prepared
-        } else {
-            UIGraphicsBeginImageContextWithOptions(rawImage.size, false, rawImage.scale)
-            rawImage.draw(in: CGRect(origin: .zero, size: rawImage.size))
-            image = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
-            UIGraphicsEndImageContext()
-        }
+        // ready to render immediately. Force decompression to prevent render thread blocking.
+        let image = forceImageDecompression(rawImage)
 
         baseFrameManager?.addFrame(image, animationName: animationName, frameIndex: frameIndex)
     }

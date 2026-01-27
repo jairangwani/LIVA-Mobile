@@ -128,20 +128,8 @@ class LIVAImageCache {
             // causing 100-270ms freezes when chunk 0 starts. By pre-rendering
             // on background thread, we avoid blocking the render thread.
             //
-            // Use iOS 15+ optimized API when available (faster), fallback to bitmap otherwise
-            let image: UIImage
-            if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
-                // iOS 15+ has optimized pre-rendering (faster than bitmap context)
-                image = prepared
-            } else {
-                // Fallback: draw to bitmap context to force decompression
-                let size = rawImage.size
-                let scale = rawImage.scale
-                UIGraphicsBeginImageContextWithOptions(size, false, scale)
-                rawImage.draw(in: CGRect(origin: .zero, size: size))
-                image = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
-                UIGraphicsEndImageContext()
-            }
+            // Force decompression on background thread to prevent render thread blocking
+            let image = forceImageDecompression(rawImage)
 
             let forceDecodeTime = CACurrentMediaTime() - forceDecodeStart
             let totalTime = CACurrentMediaTime() - startTime
@@ -247,17 +235,7 @@ class LIVAImageCache {
             let forceDecodeStart = CACurrentMediaTime()
 
             // CRITICAL FIX: Force image decompression on background thread
-            let image: UIImage
-            if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
-                image = prepared
-            } else {
-                let size = rawImage.size
-                let scale = rawImage.scale
-                UIGraphicsBeginImageContextWithOptions(size, false, scale)
-                rawImage.draw(in: CGRect(origin: .zero, size: size))
-                image = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
-                UIGraphicsEndImageContext()
-            }
+            let image = forceImageDecompression(rawImage)
 
             let forceDecodeTime = CACurrentMediaTime() - forceDecodeStart
             let totalTime = CACurrentMediaTime() - startTime

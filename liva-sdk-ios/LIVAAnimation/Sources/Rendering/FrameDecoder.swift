@@ -218,14 +218,3 @@ final class FrameDecoder {
 
 // MARK: - Image Optimization Extension
 
-extension UIImage {
-    /// Create an optimized copy for rendering
-    func optimizedForRendering() -> UIImage {
-        // Render to bitmap context for better performance
-        UIGraphicsBeginImageContextWithOptions(size, false, scale)
-        draw(in: CGRect(origin: .zero, size: size))
-        let optimized = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        return optimized ?? self
-    }
-}

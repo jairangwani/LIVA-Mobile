@@ -346,16 +346,8 @@ final class BaseFrameManager {
                 // CRITICAL: Force image decompression at load time
                 // UIImage defers JPEG/PNG decompression until first draw, which
                 // causes freezes during animation. Pre-decode on startup so base
-                // frames are ready to render immediately.
-                let image: UIImage
-                if #available(iOS 15.0, *), let prepared = rawImage.preparingForDisplay() {
-                    image = prepared
-                } else {
-                    UIGraphicsBeginImageContextWithOptions(rawImage.size, false, rawImage.scale)
-                    rawImage.draw(in: CGRect(origin: .zero, size: rawImage.size))
-                    image = UIGraphicsGetImageFromCurrentImageContext() ?? rawImage
-                    UIGraphicsEndImageContext()
-                }
+                // frames are ready to render immediately. Force decompression.
+                let image = forceImageDecompression(rawImage)
                 addFrame(image, animationName: animationName, frameIndex: index)
             }
         }
