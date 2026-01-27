@@ -337,64 +337,51 @@ public final class LIVAClient {
 
         clientLog("[LIVAClient] 📥 handleFrameBatchReceived: chunk=\(chunkIndex), batch=\(batchIndex), frames=\(frameCount)")
 
-        // PERFORMANCE FIX: Process frame batch on background thread to prevent freezing
-        // The main thread was being blocked by the for-loop iterating 30-60 frames
-        // This caused 100-200ms freezes during playback when new chunks arrived
-        Self.frameBatchQueue.async { [weak self] in
-            guard let self = self else { return }
+        // Initialize tracking arrays for this chunk if needed
+        if pendingOverlayFrames[chunkIndex] == nil {
+            pendingOverlayFrames[chunkIndex] = []
+        }
 
-            // Build overlay frames array on background thread
-            var newOverlayFrames: [OverlayFrame] = []
-            newOverlayFrames.reserveCapacity(frameCount)
+        // PERFORMANCE FIX: Build metadata synchronously (fast) but decode images asynchronously (slow)
+        // This ensures pendingOverlayFrames is populated when chunk_ready arrives,
+        // while avoiding main thread blocking from Base64 decoding
+        for (index, frame) in frameBatch.frames.enumerated() {
+            let imageDataString = frame.imageData
+            let contentKey = frame.contentBasedCacheKey
 
-            for (index, frame) in frameBatch.frames.enumerated() {
-                let imageDataString = frame.imageData
-
-                // CONTENT-BASED CACHING: Use overlay_id (or generated key) instead of positional indices
-                let contentKey = frame.contentBasedCacheKey
-
-                // ASYNC PROCESSING: Decode Base64 and create UIImage on background thread
-                let sequenceIndex = frame.sequenceIndex
-                self.newAnimationEngine?.processAndCacheOverlayImageAsync(
-                    base64Data: imageDataString,
-                    key: contentKey,
-                    chunkIndex: chunkIndex
-                ) { success in
-                    if !success {
-                        clientLog("[LIVAClient] ⚠️ Failed to process frame \(index) for chunk \(chunkIndex)")
-                    } else if sequenceIndex == 0 {
-                        clientLog("[LIVAClient] ✅ Async cached first frame: \(contentKey)")
-                    }
+            // ASYNC: Decode Base64 and create UIImage on background thread (heavy work)
+            let sequenceIndex = frame.sequenceIndex
+            newAnimationEngine?.processAndCacheOverlayImageAsync(
+                base64Data: imageDataString,
+                key: contentKey,
+                chunkIndex: chunkIndex
+            ) { success in
+                if !success {
+                    clientLog("[LIVAClient] ⚠️ Failed to process frame \(index) for chunk \(chunkIndex)")
+                } else if sequenceIndex == 0 {
+                    clientLog("[LIVAClient] ✅ Async cached first frame: \(contentKey)")
                 }
-
-                // Track animation name for this chunk (thread-safe: only set once)
-                if self.chunkAnimationNames[chunkIndex] == nil && !frame.animationName.isEmpty {
-                    self.chunkAnimationNames[chunkIndex] = frame.animationName
-                }
-
-                // Build OverlayFrame metadata
-                let overlayFrame = OverlayFrame(
-                    matchedSpriteFrameNumber: frame.matchedSpriteFrameNumber,
-                    sheetFilename: frame.sheetFilename,
-                    coordinates: .zero,
-                    imageData: nil,
-                    sequenceIndex: frame.sequenceIndex,
-                    animationName: frame.animationName,
-                    originalFrameIndex: frame.frameIndex,
-                    overlayId: contentKey,
-                    char: frame.char,
-                    viseme: nil
-                )
-                newOverlayFrames.append(overlayFrame)
             }
 
-            // Append to pending frames (minimal main thread work)
-            DispatchQueue.main.async {
-                if self.pendingOverlayFrames[chunkIndex] == nil {
-                    self.pendingOverlayFrames[chunkIndex] = []
-                }
-                self.pendingOverlayFrames[chunkIndex]?.append(contentsOf: newOverlayFrames)
+            // Track animation name for this chunk
+            if chunkAnimationNames[chunkIndex] == nil && !frame.animationName.isEmpty {
+                chunkAnimationNames[chunkIndex] = frame.animationName
             }
+
+            // SYNC: Build OverlayFrame metadata (fast - just struct creation)
+            let overlayFrame = OverlayFrame(
+                matchedSpriteFrameNumber: frame.matchedSpriteFrameNumber,
+                sheetFilename: frame.sheetFilename,
+                coordinates: .zero,
+                imageData: nil,
+                sequenceIndex: frame.sequenceIndex,
+                animationName: frame.animationName,
+                originalFrameIndex: frame.frameIndex,
+                overlayId: contentKey,
+                char: frame.char,
+                viseme: nil
+            )
+            pendingOverlayFrames[chunkIndex]?.append(overlayFrame)
         }
 
         // Also store for legacy engine (old path)
