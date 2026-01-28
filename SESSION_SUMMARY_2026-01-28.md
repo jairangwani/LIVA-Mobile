@@ -391,25 +391,51 @@ Set mode to IDLE → Start idle looping
 
 ---
 
+## End-to-End Testing Results (2026-01-28 Evening)
+
+### Test Session Summary
+
+**Tested:** Native Android app on Pixel_3a_API_34 emulator with backend on localhost:5003
+
+### Results:
+
+| Test | Status | Notes |
+|------|--------|-------|
+| Socket.IO connection | ✅ PASS | Connects successfully, events received |
+| Session logging | ✅ PASS | Sessions created on backend |
+| Base animation download | ✅ PASS | All 9 animations download correctly |
+| receive_audio events | ✅ PASS | Audio chunks received for all chunks |
+| receive_frame_images_batch | ✅ PASS | Frame batches received and decoded |
+| chunk_images_ready | ✅ PASS | Chunk ready signals received |
+| Audio-video sync | ✅ PASS | "🔊 Started audio for chunk 0 - IN SYNC with first overlay frame" |
+| OverlaySection creation | ✅ PASS | Sections built with correct frame counts |
+| Mode transitions | ✅ PASS | IDLE ↔ TALKING switches correctly |
+
+### Key Log Evidence:
+
+```
+22:40:13.783 - Queued audio for chunk 0 (15091 bytes)
+22:40:17.337 - Started overlay section: chunk=0, frames=27
+22:40:17.344 - Audio data for chunk 0: 15091 bytes
+22:40:17.385 - 🔊 Playing audio for chunk 0 - synced with first overlay frame
+22:40:18.386 - ✅ Section complete: chunk=0
+```
+
+### Known Issues:
+
+1. **Animation download time:** Cold start takes 2-3 minutes to download all base frames (~1.3MB each × 9 animations × ~46 frames each)
+2. **Socket ping timeout:** Socket disconnects after ~3 minutes of inactivity
+3. **Frame logging to backend:** Not all frames being logged to session logs (low priority)
+
+### Remaining Tests:
+
+- [ ] Visual verification (watch the emulator screen during playback)
+- [ ] Rapid message sending (audio stop race condition)
+- [ ] Compare Android vs iOS frame timing
+
+---
+
 ## Next Steps
-
-### Immediate Priority: End-to-End Testing
-
-**Goal:** Verify all implemented features work correctly together
-
-**Tasks:**
-1. Test native Android app with real backend messages
-2. Verify audio-video sync using session logs
-3. Test progressive loading (cold start vs warm start)
-4. Test transition animations (idle ↔ talking)
-5. Compare Android vs iOS frame timing and sync
-6. Test rapid message sending (audio stop race condition)
-
-**Tools:**
-- Backend: `cd AnnaOS-API && python main.py`
-- Native app: Build and run on emulator
-- Session logs: `http://localhost:5003/logs`
-- Test script: Similar to iOS test script (to be created)
 
 ### Lower Priority: Phase 1.3 - Test Suite
 

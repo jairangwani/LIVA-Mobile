@@ -421,6 +421,7 @@ internal class AnimationEngine {
 
     /**
      * Trigger audio playback for a chunk.
+     * Audio is triggered when the first overlay frame renders to ensure sync.
      */
     private fun triggerAudioForChunk(chunkIndex: Int) {
         if (audioStartedForChunk.contains(chunkIndex)) {
