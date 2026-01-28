@@ -83,10 +83,10 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
   Future<void> _setupTestUser() async {
     setState(() => _statusMessage = 'Setting up test user...');
 
-    // Auto-setup test user config (use localhost for testing)
+    // Auto-setup test user config (use platform-specific backend URL)
     await ref.read(appConfigProvider.notifier).setConfig(
-      const UserConfig(
-        serverUrl: AppConfigConstants.backendUrl, // Use localhost:5003
+      UserConfig(
+        serverUrl: AppConfigConstants.getPlatformBackendUrl(), // 10.0.2.2 for Android, localhost for iOS
         userId: 'test_user_mobile',
         agentId: '1',
       ),

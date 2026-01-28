@@ -1,10 +1,23 @@
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Application configuration constants.
 class AppConfigConstants {
-  /// Backend server URL (Local for testing)
+  /// Backend server URL (Local for testing) - iOS and desktop
   static const String backendUrl = 'http://localhost:5003';
+
+  /// Backend server URL for Android emulator (10.0.2.2 = host machine)
+  static const String backendUrlAndroid = 'http://10.0.2.2:5003';
+
+  /// Get platform-specific backend URL
+  static String getPlatformBackendUrl() {
+    if (Platform.isAndroid) {
+      return backendUrlAndroid;
+    }
+    return backendUrl;
+  }
 
   /// Default agent ID
   static const String defaultAgentId = '1';
@@ -71,13 +84,13 @@ class AppConfigNotifier extends StateNotifier<UserConfig?> {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('userId');
     final agentId = prefs.getString('agentId');
-    // TESTING: Always use localhost, ignore cached serverUrl
+    // TESTING: Always use platform-specific URL, ignore cached serverUrl
     // final serverUrl = prefs.getString('serverUrl');
 
     // TEST MODE: Auto-initialize with Agent 1 if no config
     // This allows the app to start directly with the chat screen
     state = UserConfig(
-      serverUrl: AppConfigConstants.backendUrl,
+      serverUrl: AppConfigConstants.getPlatformBackendUrl(),
       userId: userId ?? 'test_user_mobile',
       agentId: agentId ?? AppConfigConstants.defaultAgentId,
     );
@@ -129,7 +142,7 @@ enum Environment {
 String getBackendUrl(Environment env) {
   switch (env) {
     case Environment.development:
-      return 'http://localhost:5003';
+      return AppConfigConstants.getPlatformBackendUrl();
     case Environment.staging:
       return 'https://staging-api.liva.com';
     case Environment.production:

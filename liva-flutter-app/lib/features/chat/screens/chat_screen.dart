@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/config/app_config.dart';
 import '../../../platform/liva_animation.dart';
 import '../providers/chat_provider.dart';
 import '../widgets/message_input.dart';
@@ -98,9 +99,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       await Future.delayed(const Duration(milliseconds: 200));
     }
 
-    // If config still null, use fallback test config (localhost for testing)
-    config ??= const LIVAConfig(
-      serverUrl: 'http://localhost:5003',
+    // If config still null, use fallback test config (platform-specific URL)
+    config ??= LIVAConfig(
+      serverUrl: AppConfigConstants.getPlatformBackendUrl(),
       userId: 'test_user_mobile',
       agentId: '1',
     );
