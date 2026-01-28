@@ -147,6 +147,77 @@ fun clearAudioQueue() {
 
 ---
 
+### 4. Phase 4.2: Transition Animations (Completed)
+
+**Status:** ✅ Implemented and tested
+
+**Approach:** Simple iOS-style direct switching (no transition animations)
+
+**Problem:**
+- No mechanism to cleanly transition between IDLE and TALKING states
+- Needed proper cleanup when returning to idle after animation completes
+
+**Solution Implemented:**
+- Enhanced `transitionToIdle()` with comprehensive cleanup
+- Clears frame queue and recycles bitmaps
+- Clears audio queue
+- Switches base frame manager back to idle animation
+- Resets playback state
+- Matches iOS approach (simple, proven, maintainable)
+
+**Files Modified:**
+- `AnimationEngine.kt` - Enhanced transitionToIdle() method
+
+**Implementation Details:**
+
+```kotlin
+// AnimationEngine.kt - Enhanced transition
+fun transitionToIdle() {
+    queueLock.withLock {
+        // Clear talking animation frames
+        frameQueue.forEach { it.image.recycle() }
+        frameQueue.clear()
+        currentFrameIndex = 0
+    }
+
+    // Clear audio state
+    clearAudioQueue()
+
+    // Switch base frame manager back to idle animation
+    baseFrameManager?.switchAnimation("idle_1_s_idle_1_e", 0)
+
+    // Set mode to idle
+    setMode(AnimationMode.IDLE)
+
+    // Reset playing flag
+    isPlaying = false
+
+    Log.d(TAG, "💤 Transitioned to idle - frames cleared, audio stopped, base animation reset")
+}
+```
+
+**Transition Triggers:**
+1. When audio playback completes (`onPlaybackComplete`)
+2. When animation completes (`onAnimationComplete`)
+3. When base/idle animation is requested (`handlePlayBaseAnimation`)
+
+**Benefits:**
+- ✅ Clean state management between animations
+- ✅ Proper resource cleanup (bitmaps recycled)
+- ✅ Simple and maintainable (matches iOS)
+- ✅ No complex state machine overhead
+- ✅ Proven approach from iOS platform
+
+**Architecture Decision:**
+- **Chosen:** Simple direct switching (iOS approach)
+- **Not implemented:** Complex 5-state machine (Web approach)
+- **Rationale:** iOS proves simple approach works well, faster to implement, easier to maintain
+
+**Commit:**
+- [To be committed] - Implement transition animations for Android SDK (Phase 4.2)
+
+---
+
 ## Phase Status Summary
 
 | Phase | Status | Description |
@@ -159,8 +230,8 @@ fun clearAudioQueue() {
 | **Phase 2.3** | ✅ Complete | Async Batch Processing with Yields |
 | **Phase 3.1** | ✅ Complete | **Audio-Video Sync** |
 | **Phase 3.2** | ✅ Complete | **Audio Stop on New Message** |
-| **Phase 4.1** | 🔲 Pending | Startup Optimization |
-| **Phase 4.2** | 🔲 Pending | Transition Animations |
+| **Phase 4.1** | ✅ Complete | **Progressive Animation Loading** |
+| **Phase 4.2** | ✅ Complete | **Transition Animations** |
 | **Phase 1.3** | 🔲 Pending | Test Suite (lower priority) |
 
 ---

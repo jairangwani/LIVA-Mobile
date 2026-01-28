@@ -221,9 +221,29 @@ internal class AnimationEngine {
 
     /**
      * Transition to idle.
+     * Implements simple iOS-style direct switching (no transition animations).
      */
     fun transitionToIdle() {
+        queueLock.withLock {
+            // Clear talking animation frames
+            frameQueue.forEach { it.image.recycle() }
+            frameQueue.clear()
+            currentFrameIndex = 0
+        }
+
+        // Clear audio state
+        clearAudioQueue()
+
+        // Switch base frame manager back to idle animation
+        baseFrameManager?.switchAnimation("idle_1_s_idle_1_e", 0)
+
+        // Set mode to idle
         setMode(AnimationMode.IDLE)
+
+        // Reset playing flag
+        isPlaying = false
+
+        Log.d(TAG, "💤 Transitioned to idle - frames cleared, audio stopped, base animation reset")
     }
 
     // MARK: - Frame Retrieval
