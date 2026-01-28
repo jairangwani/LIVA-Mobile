@@ -21,7 +21,9 @@ Native SDKs and Flutter app for LIVA avatar animation system.
 - **LIVACanvasView** - CADisplayLink render loop with CALayer
 - **AudioPlayer** - AVAudioEngine for MP3 streaming
 - **Async Processing** - Batched frame processing with yields (2026-01-27)
-- **Performance** - 33.3ms avg frame delta, 98.5% within target, 0 cold start freezes
+- **Startup Optimization** - Synchronous single-frame loading, instant render start (2026-01-28)
+- **FPS Tracking** - Accurate tracking from app start with blocking detection
+- **Performance** - First frame at +1.0s, 60 FPS stable after frame 10, 0 cold start freezes
 
 ### Android SDK (Complete)
 - **LIVAClient** - Main SDK interface with singleton pattern

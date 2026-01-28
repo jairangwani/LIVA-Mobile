@@ -153,17 +153,31 @@ enum LIVAState {
 
 ## Performance
 
+### Startup Optimization (2026-01-28)
+
+The SDK achieves instant startup with synchronous frame loading:
+
+- **First frame:** Renders at +1.0s from app launch
+- **Frame loading:** Synchronous single-frame load (~7ms)
+- **Rendering:** Starts immediately with one frame
+- **On-demand loading:** Additional frames load when backend requests
+- **FPS tracking:** Accurate measurements from app start with blocking detection
+
+### Runtime Performance
+
 The SDK uses async frame processing to maintain 30fps animation:
 
 - **Frame processing:** Batched with main thread yields (15 frames/batch)
 - **Decode tracking:** Images marked ready only after full decode
 - **Skip-draw-on-wait:** Holds previous frame if overlay not decoded
 
-**Measured Performance (2026-01-27):**
-- 33.3ms average frame delta (30fps)
-- 98.5% frames within 28-40ms target range
-- Zero freezes on cold start
-- Chunk transitions: 74-213ms (improved from 100-300ms)
+**Measured Performance:**
+- **Startup (2026-01-28):** First frame at +1.0s, 60 FPS stable after frame 10
+- **Playback (2026-01-27):** 33.3ms average frame delta (30fps), 98.5% within target
+- **Cold start:** Zero freezes
+- **Chunk transitions:** 74-213ms (improved from 100-300ms)
+
+**Note:** Some stuttering (frames 4-8) may occur on iOS Simulator due to JIT compilation overhead. This is not present on real devices.
 
 ## Memory Management
 

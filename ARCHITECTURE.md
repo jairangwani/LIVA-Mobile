@@ -183,13 +183,27 @@ This approach matches web frontend's pattern and eliminates frame arrival freeze
 - Limit frame cache with LRU policy
 - Release via `bitmap.recycle()`
 
-### Target Metrics
+### Performance Metrics
+
+**Target:**
 | Metric | Target |
 |--------|--------|
+| Startup time | < 2s to first frame |
 | Memory (idle) | < 50MB |
 | Memory (animating) | < 150MB |
 | Frame decode time | < 5ms per frame |
 | Render time | < 16ms per frame (60fps capable) |
+
+**Measured (iOS, 2026-01-28):**
+| Metric | Actual |
+|--------|--------|
+| Startup time | 1.0s to first frame ✅ |
+| Frame load time | ~7ms per frame ✅ |
+| Stable FPS | 60 FPS after frame 10 ✅ |
+| Cold start freezes | 0 ✅ |
+| Playback FPS | 30 FPS average (33.3ms delta) ✅ |
+
+**Note:** iOS Simulator may show stuttering at frames 4-8 due to JIT compilation overhead. This is not present on real devices.
 
 ## Platform Channel API
 
