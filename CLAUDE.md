@@ -2,6 +2,39 @@
 
 Mobile SDKs for LIVA AI avatar system (iOS, Android, Flutter).
 
+---
+
+## ANDROID SDK - CONTINUE HERE
+
+**Current Goal:** Get Android to play audio and video overlays like Web/iOS.
+
+**Status:** Backend socket fix complete. Ready for end-to-end testing.
+
+**Next Step:** Read `docs/ANDROID_SDK_NEXT_STEPS.md` and start Phase 1 testing.
+
+**Quick Test:**
+```bash
+# 1. Backend
+cd AnnaOS-API && python main.py
+
+# 2. Android app
+cd LIVA-Mobile/liva-android-app && ./gradlew installDebug
+# Launch app, wait for "Connected"
+
+# 3. Send message
+curl -X POST http://localhost:5003/messages \
+  -H "Content-Type: application/json" \
+  -H "X-User-ID: test_user_android" \
+  -d '{"AgentID": "1", "instance_id": "android_test", "message": "Hello"}'
+
+# 4. Check logs
+adb logcat -s "LIVAClient" "LIVASocketManager" | grep -E "(receive_audio|receive_frame)"
+```
+
+**If events NOT received:** Check backend uses `socketio.server.emit(..., namespace='/')`
+
+---
+
 ## Quick Start (iOS)
 
 ```bash
