@@ -88,6 +88,18 @@ internal class AnimationEngine {
     var onChunkComplete: ((Int) -> Unit)? = null
     var onAnimationComplete: (() -> Unit)? = null
 
+    // Audio-video sync callback (triggers audio playback when first frame renders)
+    var onStartAudioForChunk: ((chunkIndex: Int, audioData: ByteArray) -> Unit)? = null
+
+    // MARK: - Audio Sync State
+
+    // Audio data queued per chunk (waiting for animation sync)
+    private val pendingAudioChunks = mutableMapOf<Int, ByteArray>()
+    private val audioChunkLock = ReentrantLock()
+
+    // Track which chunks have already started audio (prevent duplicate playback)
+    private val audioStartedForChunk = mutableSetOf<Int>()
+
     // MARK: - Configuration
 
     var minimumBufferFrames: Int = 10
@@ -99,6 +111,17 @@ internal class AnimationEngine {
     fun setSessionId(sessionId: String) {
         this.sessionId = sessionId
         Log.d(TAG, "Session ID set for frame logging: $sessionId")
+    }
+
+    /**
+     * Queue audio data for a chunk (don't play immediately - wait for animation sync)
+     * Audio will start when first overlay frame of this chunk renders.
+     */
+    fun queueAudioForChunk(chunkIndex: Int, audioData: ByteArray) {
+        audioChunkLock.withLock {
+            pendingAudioChunks[chunkIndex] = audioData
+            Log.d(TAG, "Queued audio for chunk $chunkIndex (${audioData.size} bytes) - waiting for animation sync")
+        }
     }
 
     // MARK: - Frame Queue Management
@@ -231,6 +254,12 @@ internal class AnimationEngine {
             if (frameQueue.isNotEmpty()) {
                 if (currentFrameIndex < frameQueue.size) {
                     overlayImage = frameQueue[currentFrameIndex].image
+
+                    // AUDIO-VIDEO SYNC: Trigger audio when first overlay frame is about to render
+                    if (currentFrameIndex == 0 && mode == AnimationMode.TALKING) {
+                        triggerAudioForCurrentChunk()
+                    }
+
                     currentFrameIndex++
                 }
 
@@ -277,6 +306,34 @@ internal class AnimationEngine {
         }
 
         return renderFrame
+    }
+
+    /**
+     * Trigger audio playback for current chunk (if not already started).
+     * Called when first overlay frame is about to render - ensures audio-video sync.
+     */
+    private fun triggerAudioForCurrentChunk() {
+        // Check if audio already started for this chunk
+        if (audioStartedForChunk.contains(currentChunkIndex)) {
+            return
+        }
+
+        // Get queued audio data for this chunk
+        val audioData = audioChunkLock.withLock {
+            pendingAudioChunks[currentChunkIndex]
+        }
+
+        if (audioData != null) {
+            // Mark as started
+            audioStartedForChunk.add(currentChunkIndex)
+
+            // Trigger callback to play audio (synchronized with first frame)
+            onStartAudioForChunk?.invoke(currentChunkIndex, audioData)
+
+            Log.d(TAG, "🔊 Started audio for chunk $currentChunkIndex - IN SYNC with first overlay frame")
+        } else {
+            Log.w(TAG, "No audio data queued for chunk $currentChunkIndex")
+        }
     }
 
     /**

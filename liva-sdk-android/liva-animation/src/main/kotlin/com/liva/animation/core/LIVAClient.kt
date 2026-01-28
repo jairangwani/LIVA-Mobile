@@ -308,8 +308,10 @@ class LIVAClient private constructor() {
             state = LIVAState.Animating
         }
 
-        // Queue audio for playback
-        audioPlayer?.queueAudio(audioChunk.audioData, audioChunk.chunkIndex)
+        // AUDIO-VIDEO SYNC: Queue audio in animation engine (don't play immediately)
+        // Audio will start when first overlay frame renders
+        animationEngine?.queueAudioForChunk(audioChunk.chunkIndex, audioChunk.audioData)
+        android.util.Log.d(TAG, "Queued audio for chunk ${audioChunk.chunkIndex} - waiting for animation sync")
 
         // Store overlay position for this chunk
         audioChunk.animationMetadata?.let { metadata ->
@@ -556,6 +558,14 @@ class LIVAClient private constructor() {
 
         animationEngine?.onChunkComplete = { chunkIndex ->
             // Chunk animation complete - logging/tracking if needed
+        }
+
+        // AUDIO-VIDEO SYNC: Trigger audio playback when first frame renders
+        animationEngine?.onStartAudioForChunk = { chunkIndex, audioData ->
+            // Called by animation engine when first overlay frame is about to render
+            // This ensures audio starts in perfect sync with animation
+            audioPlayer?.queueAudio(audioData, chunkIndex)
+            android.util.Log.d(TAG, "🔊 Playing audio for chunk $chunkIndex - synced with first overlay frame")
         }
     }
 
