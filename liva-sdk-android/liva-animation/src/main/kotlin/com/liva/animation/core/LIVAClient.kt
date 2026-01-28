@@ -305,22 +305,93 @@ class LIVAClient private constructor() {
     }
 
     private fun handleFrameBatchReceived(frameBatch: com.liva.animation.models.FrameBatch) {
-        // Decode frames asynchronously
-        scope.launch(Dispatchers.Default) {
-            val decodedFrames = frameDecoder?.decodeBatch(frameBatch) ?: return@launch
+        val chunkIndex = frameBatch.chunkIndex
+        val frames = frameBatch.frames
 
-            // Store decoded frames for this chunk
-            val chunkIndex = frameBatch.chunkIndex
-            synchronized(currentChunkFrames) {
-                if (currentChunkFrames[chunkIndex] == null) {
-                    currentChunkFrames[chunkIndex] = mutableListOf()
+        // Increment pending batch count IMMEDIATELY (track pending work)
+        synchronized(batchLock) {
+            pendingBatchCount[chunkIndex] = (pendingBatchCount[chunkIndex] ?: 0) + 1
+        }
+
+        // Process in background with batching and yields
+        scope.launch(Dispatchers.Default) {
+            // Process first frame immediately (unblock playback)
+            if (frames.isNotEmpty()) {
+                val firstFrameDecoded = frameDecoder?.decodeBatch(
+                    frameBatch.copy(frames = listOf(frames[0]))
+                ) ?: emptyList()
+
+                if (firstFrameDecoded.isNotEmpty()) {
+                    synchronized(currentChunkFrames) {
+                        if (currentChunkFrames[chunkIndex] == null) {
+                            currentChunkFrames[chunkIndex] = mutableListOf()
+                        }
+                        currentChunkFrames[chunkIndex]?.addAll(firstFrameDecoded)
+                    }
                 }
-                currentChunkFrames[chunkIndex]?.addAll(decodedFrames)
+            }
+
+            // Process remaining frames in batches of 15 with yields
+            val BATCH_SIZE = 15
+            for (i in 1 until frames.size step BATCH_SIZE) {
+                val batchEnd = minOf(i + BATCH_SIZE, frames.size)
+                val batch = frames.subList(i, batchEnd)
+
+                // Decode batch
+                val decodedBatch = frameDecoder?.decodeBatch(
+                    frameBatch.copy(frames = batch)
+                ) ?: emptyList()
+
+                // Store results
+                synchronized(currentChunkFrames) {
+                    currentChunkFrames[chunkIndex]?.addAll(decodedBatch)
+                }
+
+                // Yield to event loop (prevent blocking)
+                delay(0)
+            }
+
+            // Decrement pending count and check if all batches complete
+            withContext(Dispatchers.Main) {
+                onBatchComplete(chunkIndex)
             }
         }
     }
 
+    private fun onBatchComplete(chunkIndex: Int) {
+        val allBatchesComplete = synchronized(batchLock) {
+            val count = pendingBatchCount[chunkIndex] ?: 0
+            if (count > 1) {
+                pendingBatchCount[chunkIndex] = count - 1
+                false
+            } else {
+                pendingBatchCount.remove(chunkIndex)
+                true
+            }
+        }
+
+        if (allBatchesComplete) {
+            android.util.Log.d(TAG, "All batches complete for chunk $chunkIndex")
+            // Chunk ready processing can now proceed
+        }
+    }
+
     private fun handleChunkReady(chunkIndex: Int, totalSent: Int) {
+        // Check if batches are still processing
+        val hasPendingBatches = synchronized(batchLock) {
+            pendingBatchCount.containsKey(chunkIndex)
+        }
+
+        if (hasPendingBatches) {
+            android.util.Log.d(TAG, "Deferring chunk_ready for chunk $chunkIndex (batches still processing)")
+            // onBatchComplete will not trigger chunk ready - we'll need to manually check
+            // For now, just wait a bit and retry
+            Handler(Looper.getMainLooper()).postDelayed({
+                handleChunkReady(chunkIndex, totalSent)
+            }, 100)
+            return
+        }
+
         // Get all frames for this chunk
         val frames: List<DecodedFrame>
         synchronized(currentChunkFrames) {
