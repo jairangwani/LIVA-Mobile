@@ -14,6 +14,7 @@ import com.liva.animation.rendering.FrameDecoder
 import com.liva.animation.rendering.LIVACanvasView
 import com.liva.animation.rendering.QueuedAnimationChunk
 import com.liva.animation.rendering.ANIMATION_LOAD_ORDER
+import com.liva.animation.logging.SessionLogger
 import kotlinx.coroutines.*
 
 /**
@@ -200,6 +201,26 @@ class LIVAClient private constructor() {
             // DON'T start render loop here - wait for first idle frame to arrive
             // Render loop is started in onFirstIdleFrameReady callback to avoid
             // flickering (rendering null frames before any frame data arrives)
+
+            // Start session logging
+            val config = configuration
+            android.util.Log.e("LIVAClient", "========== onConnect: Starting session logging ==========")
+            if (config != null) {
+                android.util.Log.e("LIVAClient", "Config: serverUrl=${config.serverUrl}, userId=${config.userId}, agentId=${config.agentId}")
+                val sessionLogger = SessionLogger.getInstance()
+                sessionLogger.configure(config.serverUrl)
+                val sessionId = sessionLogger.startSession(config.userId, config.agentId)
+                android.util.Log.e("LIVAClient", "Session ID: $sessionId")
+                if (sessionId != null) {
+                    // Note: AnimationEngine.setSessionId() not available in this version
+                    // Frame logging will happen when we update AnimationEngine
+                    android.util.Log.e("LIVAClient", "✅ Session logging started!")
+                } else {
+                    android.util.Log.e("LIVAClient", "❌ startSession returned null")
+                }
+            } else {
+                android.util.Log.e("LIVAClient", "❌ Configuration is null")
+            }
 
             // Request base animation frames from server (backend won't send until requested)
             requestBaseAnimations()
