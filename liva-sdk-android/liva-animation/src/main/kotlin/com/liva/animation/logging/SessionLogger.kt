@@ -82,45 +82,64 @@ class SessionLogger private constructor() {
 
         // Generate session ID: 2026-01-28_HHMMSS_android
         val timestamp = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())
-        val newSessionId = "${timestamp}_$platform"
+        val newSessionId = "${timestamp}_android"
 
-        try {
-            // Call backend to create session
-            val url = URL("$serverUrl/api/log/session/start")
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.doOutput = true
+        Log.d(TAG, "Attempting to start session: $newSessionId")
+        Log.d(TAG, "Server URL: $serverUrl")
+        Log.d(TAG, "User: $userId, Agent: $agentId")
 
-            val requestBody = JSONObject().apply {
-                put("user_id", userId)
-                put("agent_id", agentId)
-                put("platform", platform)
-                put("session_id", newSessionId)
+        // Start session on background thread to avoid NetworkOnMainThreadException
+        scope.launch {
+            try {
+                val url = URL("$serverUrl/api/log/session/start")
+                Log.d(TAG, "Opening connection to: ${url.toString()}")
+
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.doOutput = true
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+
+                val requestBody = JSONObject().apply {
+                    put("user_id", userId)
+                    put("agent_id", agentId)
+                    put("platform", platform)
+                    put("session_id", newSessionId)
+                }
+
+                Log.d(TAG, "Request body: ${requestBody.toString()}")
+
+                OutputStreamWriter(connection.outputStream).use { writer ->
+                    writer.write(requestBody.toString())
+                    writer.flush()
+                }
+
+                val responseCode = connection.responseCode
+                Log.d(TAG, "Response code: $responseCode")
+
+                if (responseCode == 200 || responseCode == 201) {
+                    sessionId = newSessionId
+                    Log.d(TAG, "✅ Session started successfully: $sessionId")
+
+                    // Start batch processing
+                    startBatchProcessing()
+                } else {
+                    Log.e(TAG, "❌ Failed to start session: HTTP $responseCode")
+                    val errorBody = connection.errorStream?.bufferedReader()?.readText()
+                    Log.e(TAG, "Error response: $errorBody")
+                }
+
+                connection.disconnect()
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Exception starting session: ${e.javaClass.simpleName}", e)
+                Log.e(TAG, "Exception message: ${e.message}")
+                Log.e(TAG, "Stack trace: ${e.stackTraceToString()}")
             }
-
-            OutputStreamWriter(connection.outputStream).use { writer ->
-                writer.write(requestBody.toString())
-                writer.flush()
-            }
-
-            val responseCode = connection.responseCode
-            if (responseCode == 200 || responseCode == 201) {
-                sessionId = newSessionId
-                Log.d(TAG, "Started session: $sessionId")
-
-                // Start batch processing
-                startBatchProcessing()
-
-                return sessionId
-            } else {
-                Log.e(TAG, "Failed to start session: HTTP $responseCode")
-                return null
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error starting session", e)
-            return null
         }
+
+        // Return session ID immediately (async start)
+        return newSessionId
     }
 
     /**

@@ -204,23 +204,35 @@ class LIVAClient private constructor() {
         val socket = socketManager ?: return
 
         socket.onConnect = {
+            android.util.Log.d("LIVAClient", "🔥 SOCKET CONNECTED - onConnect callback START")
             state = LIVAState.Connected
             // DON'T start render loop here - wait for first idle frame to arrive
             // Render loop is started in onFirstIdleFrameReady callback to avoid
             // flickering (rendering null frames before any frame data arrives)
 
+            android.util.Log.d("LIVAClient", "🔥 About to start session logging")
             // Start session logging
             val config = configuration
+            android.util.Log.d(TAG, "About to start session logging, config=$config")
             if (config != null) {
+                android.util.Log.d(TAG, "Config valid: serverUrl=${config.serverUrl}, userId=${config.userId}, agentId=${config.agentId}")
                 val sessionLogger = SessionLogger.getInstance()
+                android.util.Log.d(TAG, "Got SessionLogger instance")
                 sessionLogger.configure(config.serverUrl)
+                android.util.Log.d(TAG, "Configured SessionLogger with ${config.serverUrl}")
                 val sessionId = sessionLogger.startSession(config.userId, config.agentId)
+                android.util.Log.d(TAG, "startSession returned: $sessionId")
                 if (sessionId != null) {
                     android.util.Log.d(TAG, "Session logging started: $sessionId")
 
                     // Pass session ID to animation engine for frame logging
                     animationEngine?.setSessionId(sessionId)
+                    android.util.Log.d(TAG, "Set session ID on AnimationEngine")
+                } else {
+                    android.util.Log.w(TAG, "startSession returned null!")
                 }
+            } else {
+                android.util.Log.w(TAG, "Configuration is null, cannot start session logging")
             }
 
             // Request base animation frames from server (backend won't send until requested)
