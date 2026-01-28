@@ -14,6 +14,7 @@ import com.liva.animation.rendering.FrameDecoder
 import com.liva.animation.rendering.LIVACanvasView
 import com.liva.animation.rendering.QueuedAnimationChunk
 import com.liva.animation.rendering.ANIMATION_LOAD_ORDER
+import com.liva.animation.logging.SessionLogger
 import kotlinx.coroutines.*
 
 /**
@@ -161,6 +162,9 @@ class LIVAClient private constructor() {
      * Disconnect from the server.
      */
     fun disconnect() {
+        // End session logging
+        SessionLogger.getInstance().endSession()
+
         canvasView?.stopRenderLoop()
         audioPlayer?.stop()
         animationEngine?.clearQueue()
@@ -200,6 +204,20 @@ class LIVAClient private constructor() {
             // DON'T start render loop here - wait for first idle frame to arrive
             // Render loop is started in onFirstIdleFrameReady callback to avoid
             // flickering (rendering null frames before any frame data arrives)
+
+            // Start session logging
+            val config = configuration
+            if (config != null) {
+                val sessionLogger = SessionLogger.getInstance()
+                sessionLogger.configure(config.serverUrl)
+                val sessionId = sessionLogger.startSession(config.userId, config.agentId)
+                if (sessionId != null) {
+                    android.util.Log.d(TAG, "Session logging started: $sessionId")
+
+                    // Pass session ID to animation engine for frame logging
+                    animationEngine?.setSessionId(sessionId)
+                }
+            }
 
             // Request base animation frames from server (backend won't send until requested)
             requestBaseAnimations()

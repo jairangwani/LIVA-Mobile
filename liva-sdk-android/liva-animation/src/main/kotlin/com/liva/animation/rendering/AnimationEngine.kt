@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.PointF
 import android.util.Log
 import com.liva.animation.models.DecodedFrame
+import com.liva.animation.logging.SessionLogger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -55,6 +56,12 @@ internal class AnimationEngine {
     var currentAnimationName: String = ""
         private set
 
+    // Session logging
+    private var sessionId: String? = null
+    private var totalRenderedFrames = 0
+    private var currentChunkIndex = 0
+    private var currentSequenceIndex = 0
+
     private val frameQueue = mutableListOf<DecodedFrame>()
     private val queueLock = ReentrantLock()
 
@@ -81,6 +88,14 @@ internal class AnimationEngine {
 
     var minimumBufferFrames: Int = 10
     var loopIdleAnimations: Boolean = true
+
+    /**
+     * Set session ID for logging
+     */
+    fun setSessionId(sessionId: String) {
+        this.sessionId = sessionId
+        Log.d(TAG, "Session ID set for frame logging: $sessionId")
+    }
 
     // MARK: - Frame Queue Management
 
@@ -224,12 +239,33 @@ internal class AnimationEngine {
             }
         }
 
-        return RenderFrame(
+        val renderFrame = RenderFrame(
             baseImage = currentBaseFrame,
             overlayImage = overlayImage,
             overlayPosition = overlayPosition,
             timestamp = currentTime
         )
+
+        // Log rendered frame to session logger
+        if (sessionId != null && overlayImage != null) {
+            totalRenderedFrames++
+
+            // Calculate FPS
+            val deltaTime = currentTime - lastFrameTime
+            val fps = if (deltaTime > 0) 1000.0 / deltaTime else 0.0
+
+            SessionLogger.getInstance().logFrame(
+                chunk = currentChunkIndex,
+                seq = currentSequenceIndex,
+                anim = currentAnimationName,
+                baseFrame = 0,  // TODO: Get actual base frame index
+                overlayKey = "overlay_${currentFrameIndex}",  // TODO: Get actual overlay key
+                syncStatus = "SYNC",
+                fps = fps
+            )
+        }
+
+        return renderFrame
     }
 
     /**
