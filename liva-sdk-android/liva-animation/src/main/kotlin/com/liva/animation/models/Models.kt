@@ -16,7 +16,8 @@ data class FrameData(
     @SerializedName("section_index") val sectionIndex: Int,
     @SerializedName("frame_index") val frameIndex: Int,
     @SerializedName("matched_sprite_frame_number") val matchedSpriteFrameNumber: Int,
-    @SerializedName("char") val char: String
+    @SerializedName("char") val char: String,
+    @SerializedName("overlay_id") val overlayId: String? = null  // Content-based cache key from backend
 )
 
 /**

@@ -73,6 +73,50 @@ internal class FrameDecoder {
         decodeSync(base64String)
     }
 
+    /**
+     * Decode a frame with content-based cache key.
+     * Uses overlay_id from backend if available, otherwise generates from animation/sprite/filename.
+     */
+    suspend fun decodeWithContentKey(
+        base64String: String,
+        overlayId: String?,
+        animationName: String?,
+        spriteNumber: Int?,
+        sheetFilename: String?
+    ): Pair<String, Bitmap?> = withContext(Dispatchers.Default) {
+        // Generate content-based cache key
+        val cacheKey = if (!overlayId.isNullOrEmpty()) {
+            overlayId  // Prefer backend-provided overlay_id
+        } else if (animationName != null && spriteNumber != null && sheetFilename != null) {
+            // Fallback: generate content key
+            "$animationName/$spriteNumber/$sheetFilename"
+        } else {
+            // Last resort: use first 100 chars (old behavior)
+            base64String.take(100)
+        }
+
+        // Check cache
+        imageCache.get(cacheKey)?.let { return@withContext cacheKey to it }
+
+        // Decode
+        val bitmap = try {
+            val base64 = if (base64String.contains("base64,")) {
+                base64String.substringAfter("base64,")
+            } else {
+                base64String
+            }
+            val bytes = Base64.decode(base64, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        } catch (e: Exception) {
+            null
+        }
+
+        // Cache result
+        bitmap?.let { imageCache.put(cacheKey, it) }
+
+        cacheKey to bitmap
+    }
+
     // MARK: - Batch Decoding
 
     /**
@@ -83,9 +127,18 @@ internal class FrameDecoder {
 
         batch.frames.mapNotNull { frameData ->
             async {
-                decodeSync(frameData.imageData)?.let { bitmap ->
+                // Use content-based cache keys
+                val (cacheKey, bitmap) = decodeWithContentKey(
+                    base64String = frameData.imageData,
+                    overlayId = frameData.overlayId,
+                    animationName = frameData.animationName,
+                    spriteNumber = frameData.spriteIndexFolder,
+                    sheetFilename = frameData.sheetFilename
+                )
+
+                bitmap?.let {
                     DecodedFrame(
-                        image = bitmap,
+                        image = it,
                         sequenceIndex = frameData.sequenceIndex,
                         animationName = frameData.animationName
                     )
@@ -97,6 +150,14 @@ internal class FrameDecoder {
 
         // Sort by sequence index
         decodedFrames.sortedBy { it.sequenceIndex }
+    }
+
+    /**
+     * Clear all overlay frames from cache (called on new message).
+     */
+    fun clearAllOverlays() {
+        imageCache.evictAll()
+        android.util.Log.d("FrameDecoder", "Cleared all overlay caches")
     }
 
     /**
