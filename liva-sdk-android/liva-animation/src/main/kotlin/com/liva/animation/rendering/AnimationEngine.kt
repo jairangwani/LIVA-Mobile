@@ -62,6 +62,10 @@ internal class AnimationEngine {
     private var currentChunkIndex = 0
     private var currentSequenceIndex = 0
 
+    // Skip-frame-on-wait logic
+    private var shouldSkipFrameAdvance = false
+    private var lastRenderFrame: RenderFrame? = null
+
     private val frameQueue = mutableListOf<DecodedFrame>()
     private val queueLock = ReentrantLock()
 
@@ -196,6 +200,9 @@ internal class AnimationEngine {
     fun getNextFrame(): RenderFrame? {
         val currentTime = System.currentTimeMillis()
 
+        // Reset skip flag
+        shouldSkipFrameAdvance = false
+
         if (currentTime - lastFrameTime < mode.frameIntervalMs) {
             return getCurrentRenderFrame(currentTime)
         }
@@ -208,6 +215,7 @@ internal class AnimationEngine {
             if (idleFrame.baseImage == null) {
                 Log.w(TAG, "getNextFrame IDLE returning NULL baseImage!")
             }
+            lastRenderFrame = idleFrame
             return idleFrame
         }
 
@@ -246,6 +254,9 @@ internal class AnimationEngine {
             timestamp = currentTime
         )
 
+        // Cache for skip-frame scenarios
+        lastRenderFrame = renderFrame
+
         // Log rendered frame to session logger
         if (sessionId != null && overlayImage != null) {
             totalRenderedFrames++
@@ -266,6 +277,13 @@ internal class AnimationEngine {
         }
 
         return renderFrame
+    }
+
+    /**
+     * Get current render frame without advancing.
+     */
+    private fun getCurrentRenderFrame(currentTime: Long): RenderFrame? {
+        return lastRenderFrame?.copy(timestamp = currentTime)
     }
 
     /**

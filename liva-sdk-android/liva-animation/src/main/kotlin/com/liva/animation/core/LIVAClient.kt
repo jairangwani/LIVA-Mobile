@@ -93,6 +93,10 @@ class LIVAClient private constructor() {
     private val currentChunkFrames = mutableMapOf<Int, MutableList<DecodedFrame>>()
     private val pendingOverlayPositions = mutableMapOf<Int, PointF>()
 
+    // Batch processing tracking
+    private val pendingBatchCount = mutableMapOf<Int, Int>()
+    private val batchLock = Any()
+
     // MARK: - Base Frame Loading State
 
     private var isBaseFramesLoaded: Boolean = false

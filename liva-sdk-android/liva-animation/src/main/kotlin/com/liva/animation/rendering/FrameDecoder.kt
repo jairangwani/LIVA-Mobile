@@ -30,6 +30,10 @@ internal class FrameDecoder {
         }
     }
 
+    // Track which images are fully decoded (not just cached)
+    private val decodedKeys = mutableSetOf<String>()
+    private val decodedKeysLock = Any()
+
     // Bitmap options for reuse
     private val options = BitmapFactory.Options().apply {
         inMutable = true
@@ -111,10 +115,31 @@ internal class FrameDecoder {
             null
         }
 
-        // Cache result
-        bitmap?.let { imageCache.put(cacheKey, it) }
+        // Cache result and mark as decoded
+        bitmap?.let {
+            imageCache.put(cacheKey, it)
+            synchronized(decodedKeysLock) {
+                decodedKeys.add(cacheKey)
+            }
+        }
 
         cacheKey to bitmap
+    }
+
+    /**
+     * Check if an image is fully decoded and ready to render.
+     */
+    fun isImageDecoded(key: String): Boolean {
+        return synchronized(decodedKeysLock) {
+            decodedKeys.contains(key)
+        }
+    }
+
+    /**
+     * Check if image exists in cache (may not be decoded yet).
+     */
+    fun hasImage(key: String): Boolean {
+        return imageCache.get(key) != null
     }
 
     // MARK: - Batch Decoding
@@ -157,7 +182,10 @@ internal class FrameDecoder {
      */
     fun clearAllOverlays() {
         imageCache.evictAll()
-        android.util.Log.d("FrameDecoder", "Cleared all overlay caches")
+        synchronized(decodedKeysLock) {
+            decodedKeys.clear()
+        }
+        android.util.Log.d("FrameDecoder", "Cleared all overlay caches and decoded keys")
     }
 
     /**
