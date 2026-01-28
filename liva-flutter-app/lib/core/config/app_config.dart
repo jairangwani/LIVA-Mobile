@@ -8,8 +8,9 @@ class AppConfigConstants {
   /// Backend server URL (Local for testing) - iOS and desktop
   static const String backendUrl = 'http://localhost:5003';
 
-  /// Backend server URL for Android emulator (10.0.2.2 = host machine)
-  static const String backendUrlAndroid = 'http://10.0.2.2:5003';
+  /// Backend server URL for Android emulator
+  /// Use localhost with adb reverse: `adb reverse tcp:5003 tcp:5003`
+  static const String backendUrlAndroid = 'http://localhost:5003';
 
   /// Get platform-specific backend URL
   static String getPlatformBackendUrl() {

@@ -28,7 +28,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val SERVER_URL = "http://10.0.2.2:5003"  // Android emulator -> host
+        // Use localhost with adb reverse: `adb reverse tcp:5003 tcp:5003`
+        private const val SERVER_URL = "http://localhost:5003"
         private const val USER_ID = "test_user_android"
         private const val AGENT_ID = "1"
     }
