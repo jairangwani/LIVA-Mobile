@@ -101,6 +101,7 @@ class LIVAClient private constructor() {
 
     private var isBaseFramesLoaded: Boolean = false
     private var pendingConnect: Boolean = false
+    private var isBackgroundLoadingStarted: Boolean = false
 
     // MARK: - Public Methods
 
@@ -185,11 +186,47 @@ class LIVAClient private constructor() {
      * Request base animations from server in sequence.
      * Starts with idle animation which unlocks the UI.
      */
+    /**
+     * Request base animations with progressive loading strategy.
+     * Priority 1: Idle animation (unlocks UI fast)
+     * Priority 2: Remaining animations (background loading)
+     */
     private fun requestBaseAnimations() {
-        currentAnimationLoadIndex = 0
-        requestNextAnimation()
+        // STARTUP OPTIMIZATION: Request idle first for fast startup
+        android.util.Log.d(TAG, "🚀 STARTUP: Requesting idle animation first for fast UI unlock")
+        socketManager?.requestBaseAnimation("idle_1_s_idle_1_e")
+
+        // Remaining animations will load in background after idle completes
+        // (triggered by onAnimationComplete callback)
     }
 
+    /**
+     * Load remaining animations in background (called after idle loads)
+     */
+    private fun loadRemainingAnimationsInBackground() {
+        // Prevent duplicate triggers
+        if (isBackgroundLoadingStarted) {
+            android.util.Log.d(TAG, "Background loading already started, skipping")
+            return
+        }
+        isBackgroundLoadingStarted = true
+
+        val remainingAnimations = ANIMATION_LOAD_ORDER.filterNot {
+            it == "idle_1_s_idle_1_e"
+        }
+
+        android.util.Log.d(TAG, "🚀 STARTUP: Loading ${remainingAnimations.size} remaining animations in background")
+
+        // Load animations with small delays to avoid overwhelming server
+        scope.launch(Dispatchers.IO) {
+            remainingAnimations.forEach { animationName ->
+                socketManager?.requestBaseAnimation(animationName)
+                delay(50) // Small delay between requests
+            }
+        }
+    }
+
+    @Deprecated("Use progressive loading instead")
     private fun requestNextAnimation() {
         if (currentAnimationLoadIndex < ANIMATION_LOAD_ORDER.size) {
             val animationType = ANIMATION_LOAD_ORDER[currentAnimationLoadIndex]
@@ -491,15 +528,17 @@ class LIVAClient private constructor() {
     private fun handleAnimationFramesComplete(animationName: String) {
         android.util.Log.d("LIVAClient", "Animation complete: $animationName")
 
-        // Animation complete, check if idle is ready
+        // STARTUP OPTIMIZATION: When idle completes, start background loading
         if (animationName == "idle_1_s_idle_1_e" && !isBaseFramesLoaded) {
             isBaseFramesLoaded = true
             notifyIdleReady()
+
+            // UI is now ready! Load remaining animations in background
+            android.util.Log.d(TAG, "🚀 STARTUP: Idle animation complete - UI ready! Starting background loading...")
+            loadRemainingAnimationsInBackground()
         }
 
-        // Request next animation in sequence
-        currentAnimationLoadIndex++
-        requestNextAnimation()
+        // For all other animations, just log completion (background loading handles them)
     }
 
     // MARK: - Base Frame Manager Callbacks
