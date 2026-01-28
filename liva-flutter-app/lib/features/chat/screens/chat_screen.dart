@@ -108,7 +108,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       debugPrint('LIVA: Initializing with serverUrl=${config.serverUrl}, userId=${config.userId}, agentId=${config.agentId}');
       await LIVAAnimation.initialize(config: config);
-      debugPrint('LIVA: Initialized, now connecting...');
+      debugPrint('LIVA: Initialized, deferring connection for 5 seconds to let render loop stabilize...');
+
+      // DEFER socket connection by 5 seconds to let iOS render loop stabilize
+      // This prevents blocking that causes 6 FPS startup stuttering
+      await Future.delayed(const Duration(seconds: 5));
+
+      debugPrint('LIVA: Now connecting after delay...');
       await LIVAAnimation.connect();
       debugPrint('LIVA: Connect called, state=${LIVAAnimation.state.value}');
       _isInitialized = true;

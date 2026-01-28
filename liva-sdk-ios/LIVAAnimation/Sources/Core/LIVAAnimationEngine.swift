@@ -166,6 +166,17 @@ class LIVAAnimationEngine {
     /// Track which chunks have started audio playback
     private var audioStartedForChunk: Set<Int> = []
 
+    // MARK: - Startup FPS Logging
+
+    /// Counter for total rendered frames (for startup logging)
+    private var totalRenderedFrames: Int = 0
+
+    /// Timestamp of APP START (not first frame) - set externally
+    private var appStartTime: Date?
+
+    /// Track if we've logged startup complete
+    private var startupLoggingComplete: Bool = false
+
     // MARK: - Constants
 
     /// Idle animation frame rate (FPS) - increased from 10 to 30 for smoother playback
@@ -198,7 +209,50 @@ class LIVAAnimationEngine {
         stopRendering()
     }
 
+    // MARK: - FPS Logging Helper
+
+    private func writeToFPSLog(_ message: String) {
+        let logPath = "/tmp/fps_startup.log"
+        let timestamp = Date()
+        let logLine = "\(timestamp) | \(message)\n"
+
+        if let data = logLine.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logPath) {
+                if let fileHandle = FileHandle(forWritingAtPath: logPath) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: logPath), options: .atomic)
+            }
+        }
+    }
+
+    private func writeToStartupLog(_ message: String) {
+        let logPath = "/tmp/startup_timing.log"
+        let timestamp = Date()
+        let logLine = "\(timestamp) | \(message)\n"
+
+        if let data = logLine.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logPath) {
+                if let fileHandle = FileHandle(forWritingAtPath: logPath) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: logPath), options: .atomic)
+            }
+        }
+    }
+
     // MARK: - Public API
+
+    /// Set app start time for accurate FPS tracking from app launch
+    func setAppStartTime(_ startTime: Date) {
+        self.appStartTime = startTime
+    }
 
     /// Start the rendering loop
     func startRendering() {
@@ -521,8 +575,69 @@ class LIVAAnimationEngine {
         let deltaTime = now - lastFrameTime
 
         // Track delta time for frame advancement
+        let deltaBeforeUpdate = deltaTime
         lastFrameTime = now
         drawCallCount += 1
+
+        // Log if delta is unusually high (blocking detected)
+        if deltaBeforeUpdate > 0.1 { // More than 100ms
+            NSLog("⚠️ [BLOCKING DETECTED] Frame took %.1fms to render!", deltaBeforeUpdate * 1000)
+        }
+
+        // STARTUP FPS LOGGING: Log first 100 frames to verify smooth startup
+        // Track time from APP START, not first frame render
+        if !startupLoggingComplete {
+            totalRenderedFrames += 1
+
+            if totalRenderedFrames == 1 {
+                if let startTime = appStartTime {
+                    let elapsedFromAppStart = Date().timeIntervalSince(startTime)
+                    let logMsg = String(format: "🎬 [FRAME 1] First frame rendered at +%.3fs from app start!", elapsedFromAppStart)
+                    NSLog(logMsg)
+                    writeToFPSLog(logMsg)
+                    writeToStartupLog(logMsg)
+                } else {
+                    let logMsg = "🎬 [FRAME 1] First frame rendered! (app start time not set)"
+                    NSLog(logMsg)
+                    writeToFPSLog(logMsg)
+                }
+            }
+
+            if totalRenderedFrames <= 100 {
+                let fps = deltaTime > 0 ? 1.0 / deltaTime : 0
+
+                // Calculate time from app start (not first frame)
+                let elapsedFromAppStart: TimeInterval
+                if let startTime = appStartTime {
+                    elapsedFromAppStart = Date().timeIntervalSince(startTime)
+                } else {
+                    elapsedFromAppStart = 0
+                }
+
+                let logMsg = String(format: "📊 [FRAME %3d] +%.3fs from app start | delta: %6.1fms | fps: %5.1f | mode: %@",
+                    totalRenderedFrames,
+                    elapsedFromAppStart,
+                    deltaTime * 1000,
+                    fps,
+                    mode == .overlay ? "overlay" : "idle")
+                NSLog(logMsg)
+                writeToFPSLog(logMsg)
+            }
+
+            if totalRenderedFrames == 100 {
+                if let startTime = appStartTime {
+                    let totalTimeFromStart = Date().timeIntervalSince(startTime)
+                    let logMsg = "✅ [STARTUP COMPLETE] First 100 frames in \(String(format: "%.2f", totalTimeFromStart))s from app start"
+                    NSLog(logMsg)
+                    writeToFPSLog(logMsg)
+                } else {
+                    let logMsg = "✅ [STARTUP COMPLETE] First 100 frames rendered"
+                    NSLog(logMsg)
+                    writeToFPSLog(logMsg)
+                }
+                startupLoggingComplete = true
+            }
+        }
 
         // FREEZE DETECTION: Log when frame delta is abnormally high (> 50ms = potential freeze)
         if deltaTime > 0.050 && drawCallCount > 10 {

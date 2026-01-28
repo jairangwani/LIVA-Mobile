@@ -336,6 +336,38 @@ final class BaseFrameManager {
         }
     }
 
+    /// Check if animation exists in cache (without loading it)
+    func hasCachedAnimation(_ animationName: String) -> Bool {
+        guard let cacheDir = cacheDirectory else { return false }
+
+        let animationDir = cacheDir.appendingPathComponent(animationName, isDirectory: true)
+        // Check for frame_0000.png instead of manifest.json (we don't save manifest)
+        let frame0Path = animationDir.appendingPathComponent("frame_0000.png")
+
+        return FileManager.default.fileExists(atPath: frame0Path.path)
+    }
+
+    /// Load a single frame from disk cache (for frame-by-frame loading)
+    /// - Parameters:
+    ///   - animationName: Animation name
+    ///   - frameIndex: Frame index (0-based)
+    /// - Returns: UIImage if found, nil otherwise
+    func loadSingleFrame(animationName: String, frameIndex: Int) -> UIImage? {
+        guard let cacheDir = cacheDirectory else { return nil }
+
+        let animationDir = cacheDir.appendingPathComponent(animationName, isDirectory: true)
+        // Use same format as when saving: frame_%04d.png
+        let fileName = String(format: "frame_%04d.png", frameIndex)
+        let framePath = animationDir.appendingPathComponent(fileName)
+
+        guard FileManager.default.fileExists(atPath: framePath.path) else {
+            return nil
+        }
+
+        // Load image from disk
+        return UIImage(contentsOfFile: framePath.path)
+    }
+
     /// Load animation from disk cache
     func loadFromCache(animationName: String) -> Bool {
         guard let cacheDir = cacheDirectory else { return false }

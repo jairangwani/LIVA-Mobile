@@ -137,15 +137,42 @@ public final class LIVAClient {
     /// Track app startup time for performance logging
     private var appStartTime: Date = Date()
 
+    /// Write startup timing to file for debugging
+    private func logStartupTiming(_ message: String) {
+        let elapsed = Date().timeIntervalSince(appStartTime)
+        let logMsg = String(format: "[%.3fs] %@", elapsed, message)
+        NSLog(logMsg)
+
+        // Also write to file
+        let logPath = "/tmp/startup_timing.log"
+        let logLine = "\(Date()) | \(logMsg)\n"
+        if let data = logLine.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logPath) {
+                if let fileHandle = FileHandle(forWritingAtPath: logPath) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: logPath), options: .atomic)
+            }
+        }
+    }
+
     // MARK: - Public Methods
 
     /// Configure the SDK with connection parameters
     /// - Parameter config: Configuration object
     public func configure(_ config: LIVAConfiguration) {
+        appStartTime = Date()  // Reset timing on configure
+        logStartupTiming("⚙️ configure() START")
+
         self.configuration = config
 
         // Initialize components
+        logStartupTiming("Creating AudioPlayer...")
         audioPlayer = AudioPlayer()
+        logStartupTiming("Creating BaseFrameManager...")
         baseFrameManager = BaseFrameManager()
 
         // NEW - Initialize new animation engine (will replace old one)
@@ -160,22 +187,29 @@ public final class LIVAClient {
         setupBaseFrameManagerCallbacks()
 
         // Try to load base frames from cache
+        logStartupTiming("Checking cache...")
         loadBaseFramesFromCache()
+        logStartupTiming("⚙️ configure() END")
     }
 
     /// Attach a canvas view for rendering
     /// - Parameter view: The canvas view to render to
     public func attachView(_ view: LIVACanvasView) {
+        logStartupTiming("📱 attachView() START")
+
         self.canvasView = view
 
         // Initialize animation engine with canvas view
+        logStartupTiming("Creating animation engine...")
         newAnimationEngine = LIVAAnimationEngine(canvasView: view)
         newAnimationEngine?.delegate = self  // Set delegate for audio-animation sync
 
         clientLog("[LIVAClient] ✅ Attached canvas view and initialized new animation engine with audio sync")
 
         // CRITICAL: Load any cached animations into the engine
+        logStartupTiming("Loading animations into engine...")
         loadCachedAnimationsIntoEngine()
+        logStartupTiming("📱 attachView() END")
     }
 
     /// DEBUG: Disable overlay rendering to test base frames + audio only
@@ -934,6 +968,7 @@ public final class LIVAClient {
             if animationName == "idle_1_s_idle_1_e" {
                 let elapsed = Date().timeIntervalSince(appStartTime)
                 print("⏱️ [RENDERING STARTED] +\(String(format: "%.2f", elapsed))s - Animation engine rendering idle loop")
+                newAnimationEngine?.setAppStartTime(appStartTime)
                 newAnimationEngine?.startRendering()
                 clientLog("[LIVAClient] ▶️ Started new animation engine rendering")
             }
@@ -1085,18 +1120,19 @@ public final class LIVAClient {
         var cacheHits = 0
         var cacheMisses = 0
 
-        // Try to load from disk cache
-        for animationName in animationsToLoad {
-            if baseFrameManager?.loadFromCache(animationName: animationName) == true {
-                cacheHits += 1
-                let elapsed = Date().timeIntervalSince(appStartTime)
-                print("⏱️ [CACHE HIT] +\(String(format: "%.2f", elapsed))s - Loaded \(animationName) from cache")
+        // CRITICAL FIX: Don't load ANY frames from disk during startup!
+        // Just check if they exist in cache and mark them as available
+        // Actual loading happens frame-by-frame when engine is ready
 
-                // Track loaded animation (for readyAnimations communication with backend)
+        for animationName in animationsToLoad {
+            if baseFrameManager?.hasCachedAnimation(animationName) == true {
+                // Mark as available in cache (don't load yet!)
                 loadedAnimationNames.insert(animationName)
+                cacheHits += 1
 
                 if animationName == "idle_1_s_idle_1_e" {
                     isBaseFramesLoaded = true
+                    print("✅ [CACHE CHECK] Idle animation found in cache (not loaded yet)")
                 }
             } else {
                 cacheMisses += 1
@@ -1131,78 +1167,310 @@ public final class LIVAClient {
             let expectedCount = baseFrameManager?.getTotalFrames(for: animationName) ?? frames.count
             print("⏱️ [LAZY LOAD] Loading \(animationName) from cache on-demand (\(frames.count) frames)...")
 
-            // Load frames ONE AT A TIME with yields to avoid blocking render loop
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self = self else { return }
-
-                // Load in batches of 15 frames (same as overlay processing)
-                let batchSize = 15
-                for batchStart in stride(from: 0, to: frames.count, by: batchSize) {
-                    let batchEnd = min(batchStart + batchSize, frames.count)
-                    let batchFrames = Array(frames[batchStart..<batchEnd])
-
-                    // Yield to main thread for each batch
-                    DispatchQueue.main.async {
-                        // Note: loadBaseAnimation replaces all frames, so we call it once with full set
-                        // This is just to yield control between batches
-                    }
-
-                    // Small delay between batches to prevent CPU spike
-                    Thread.sleep(forTimeInterval: 0.01) // 10ms
-                }
-
-                // After all batches processed, load the full animation into engine
-                DispatchQueue.main.async {
-                    self.newAnimationEngine?.loadBaseAnimation(
-                        name: animationName,
-                        frames: frames,
-                        expectedCount: expectedCount
-                    )
-                    print("✅ [LAZY LOAD] Loaded \(animationName) from cache (\(frames.count) frames)")
-                }
-            }
+            // Use sequential loading (one frame at a time with yields)
+            // Don't start rendering (already rendering idle)
+            loadAnimationSequentiallyInBackground(
+                animationName: animationName,
+                frames: frames,
+                expectedCount: expectedCount
+            )
         }
         // If not in cache, it will download via normal flow (handleBaseAnimationReceived)
+    }
+
+    /// SIMPLE: Load animation frame-by-frame from cache (one at a time)
+    /// - Parameters:
+    ///   - animationName: Name of the animation
+    ///   - expectedCount: Total frames expected
+    private func loadAnimationFrameByFrame(
+        animationName: String,
+        expectedCount: Int
+    ) {
+        logStartupTiming("🎬 loadAnimationFrameByFrame() START for \(animationName)")
+
+        // Load in background worker thread
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            var loadedFrames: [UIImage] = []
+
+            self.logStartupTiming("Loading frame 0 from disk...")
+            // Load frame 1, start rendering IMMEDIATELY
+            if let frame0 = self.baseFrameManager?.loadSingleFrame(animationName: animationName, frameIndex: 0) {
+                self.logStartupTiming("✅ Frame 0 loaded from disk! Size: \(frame0.size)")
+                loadedFrames.append(frame0)
+
+                // Update engine with frame 1 on main thread
+                DispatchQueue.main.async {
+                    self.logStartupTiming("Dispatched to main thread, loading frame into engine...")
+
+                    self.newAnimationEngine?.loadBaseAnimation(
+                        name: animationName,
+                        frames: loadedFrames,
+                        expectedCount: expectedCount
+                    )
+
+                    self.logStartupTiming("Frame loaded into engine, calling startRendering()...")
+
+                    // Set app start time for accurate FPS tracking
+                    self.newAnimationEngine?.setAppStartTime(self.appStartTime)
+
+                    // Start rendering with just 1 frame!
+                    self.newAnimationEngine?.startRendering()
+
+                    let elapsed = Date().timeIntervalSince(self.appStartTime)
+                    print("🎉 [RENDERING STARTED] +\(String(format: "%.2f", elapsed))s - Starting with 1 frame!")
+                    self.logStartupTiming("🎉 startRendering() CALLED - should see first frame NOW!")
+
+                    // Unlock UI
+                    if !self.isReadyForInteraction {
+                        self.isReadyForInteraction = true
+                        self.onReadyStateChange?(true)
+                    }
+                }
+            } else {
+                self.logStartupTiming("❌ ERROR: Failed to load frame 0 from disk!")
+                self.logStartupTiming("    Animation: \(animationName), expectedCount: \(expectedCount)")
+                NSLog("❌ Failed to load frame 0 for \(animationName)")
+            }
+
+            //  DON'T load remaining frames automatically - only load when user sends message
+            // This prevents ANY disk I/O from interfering with render loop
+            self.logStartupTiming("⏸️  NOT loading remaining frames automatically - will load on-demand")
+        }
+    }
+
+    /// Load remaining frames in small batches with delays to prevent render loop blocking
+    /// - Parameters:
+    ///   - animationName: Animation name
+    ///   - loadedFrames: Array of frames (starting with frame 0)
+    ///   - startIndex: First frame to load (usually 1)
+    ///   - expectedCount: Total frames expected
+    ///   - batchSize: Frames per batch (default 5)
+    ///   - delayBetweenBatches: Delay in seconds between batches (default 2.0)
+    private func loadRemainingFramesInBatches(
+        animationName: String,
+        loadedFrames: [UIImage],
+        startIndex: Int,
+        expectedCount: Int,
+        batchSize: Int = 5,
+        delayBetweenBatches: TimeInterval = 2.0
+    ) {
+        var mutableLoadedFrames = loadedFrames
+
+        // Calculate batches
+        let remainingFrames = expectedCount - startIndex
+        let batchCount = (remainingFrames + batchSize - 1) / batchSize  // Ceiling division
+
+        logStartupTiming("📦 Starting batched loading: \(remainingFrames) frames in \(batchCount) batches of \(batchSize)")
+
+        // Load first batch after 5 seconds (give user smooth startup experience)
+        var currentBatch = 0
+        var currentFrameIndex = startIndex
+
+        func loadNextBatch() {
+            guard currentBatch < batchCount else {
+                // All batches complete
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+
+                    self.newAnimationEngine?.loadBaseAnimation(
+                        name: animationName,
+                        frames: mutableLoadedFrames,
+                        expectedCount: expectedCount
+                    )
+
+                    let elapsed = Date().timeIntervalSince(self.appStartTime)
+                    print("✅ [BATCHED LOAD] +\(String(format: "%.2f", elapsed))s - All \(mutableLoadedFrames.count) frames loaded for \(animationName)")
+                    self.logStartupTiming("✅ All \(mutableLoadedFrames.count) frames loaded in \(batchCount) batches!")
+                }
+                return
+            }
+
+            let batchStartIndex = currentFrameIndex
+            let batchEndIndex = min(currentFrameIndex + batchSize, expectedCount)
+            let delay = currentBatch == 0 ? 5.0 : delayBetweenBatches  // First batch after 5s, rest after 2s
+
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self else { return }
+
+                self.logStartupTiming("📦 Loading batch \(currentBatch + 1)/\(batchCount): frames \(batchStartIndex)..\(batchEndIndex - 1)")
+
+                // Load frames in this batch
+                for frameIndex in batchStartIndex..<batchEndIndex {
+                    if let frame = self.baseFrameManager?.loadSingleFrame(animationName: animationName, frameIndex: frameIndex) {
+                        mutableLoadedFrames.append(frame)
+                    }
+                }
+
+                // Update engine with new frames
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+
+                    self.newAnimationEngine?.loadBaseAnimation(
+                        name: animationName,
+                        frames: mutableLoadedFrames,
+                        expectedCount: expectedCount
+                    )
+
+                    self.logStartupTiming("✅ Batch \(currentBatch + 1)/\(batchCount) loaded: \(mutableLoadedFrames.count)/\(expectedCount) frames total")
+                }
+
+                // Move to next batch
+                currentBatch += 1
+                currentFrameIndex = batchEndIndex
+                loadNextBatch()
+            }
+        }
+
+        // Start loading
+        loadNextBatch()
+    }
+
+    /// Load animation frames sequentially in background (for lazy loading)
+    /// - Parameters:
+    ///   - animationName: Name of the animation
+    ///   - frames: Full array of frames (already decoded)
+    ///   - expectedCount: Expected frame count
+    private func loadAnimationSequentiallyInBackground(
+        animationName: String,
+        frames: [UIImage],
+        expectedCount: Int
+    ) {
+        guard !frames.isEmpty else { return }
+
+        // Frames are already decoded - just load them in ONE dispatch
+        // Don't block render loop with multiple dispatches
+        DispatchQueue.main.async { [weak self] in
+            self?.newAnimationEngine?.loadBaseAnimation(
+                name: animationName,
+                frames: frames,
+                expectedCount: expectedCount
+            )
+            print("✅ [LAZY LOAD] Loaded \(animationName) from cache (\(frames.count) frames)")
+        }
+    }
+
+    /// Load animation frames with minimal main thread blocking
+    /// - Parameters:
+    ///   - animationName: Name of the animation
+    ///   - frames: Full array of frames (already decoded in memory)
+    ///   - expectedCount: Expected frame count
+    ///   - startRenderingAfterFirstFrames: Start rendering after N frames (default: 5)
+    private func loadAnimationSequentially(
+        animationName: String,
+        frames: [UIImage],
+        expectedCount: Int,
+        startRenderingAfterFirstFrames: Int = 5
+    ) {
+        guard !frames.isEmpty else { return }
+
+        // CRITICAL FIX: Frames are already decoded UIImages in memory
+        // Loading them into engine is fast - the issue is MULTIPLE main thread dispatches
+        // Solution: Load first 5, start rendering, then load ALL remaining in ONE dispatch
+
+        let firstBatch = Array(frames.prefix(startRenderingAfterFirstFrames))
+
+        // Load first 5 frames and start rendering
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            // Load first 5 frames ONLY
+            self.newAnimationEngine?.loadBaseAnimation(
+                name: animationName,
+                frames: firstBatch,
+                expectedCount: expectedCount
+            )
+
+            let elapsed = Date().timeIntervalSince(self.appStartTime)
+            print("🎉🎉🎉 [RENDERING STARTED] +\(String(format: "%.2f", elapsed))s - Starting with \(firstBatch.count) frames!")
+
+            // Set app start time for accurate FPS tracking
+            self.newAnimationEngine?.setAppStartTime(self.appStartTime)
+
+            // Start rendering immediately with 5 frames
+            self.newAnimationEngine?.startRendering()
+
+            // Unlock UI
+            if !self.isReadyForInteraction {
+                self.isReadyForInteraction = true
+                self.onReadyStateChange?(true)
+            }
+
+            // Load remaining frames after 100ms (let render loop stabilize first)
+            // This is ONE single main thread dispatch after rendering starts
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                // Load ALL frames in one go (frames already decoded, this is fast)
+                self.newAnimationEngine?.loadBaseAnimation(
+                    name: animationName,
+                    frames: frames,  // Full array
+                    expectedCount: expectedCount
+                )
+
+                let elapsed2 = Date().timeIntervalSince(self.appStartTime)
+                print("✅ [SEQUENTIAL LOAD] +\(String(format: "%.2f", elapsed2))s - All \(frames.count) frames loaded for \(animationName)")
+            }
+        }
     }
 
     private func loadCachedAnimationsIntoEngine() {
         guard newAnimationEngine != nil else { return }
 
         let elapsed = Date().timeIntervalSince(appStartTime)
-        print("⏱️ [CACHE→ENGINE] +\(String(format: "%.2f", elapsed))s - Loading cached animations into engine...")
+        print("⏱️ [CACHE→ENGINE] +\(String(format: "%.2f", elapsed))s - Loading frame SYNCHRONOUSLY on main thread...")
+        logStartupTiming("loadCachedAnimationsIntoEngine() called - loading synchronously")
 
-        // CRITICAL: Load idle FIRST and start rendering immediately
-        // Load other animations in background to avoid blocking
+        // Load frame 0 SYNCHRONOUSLY on main thread (no async overhead)
+        // This ensures the frame is ready IMMEDIATELY before startRendering
         let idleAnimation = "idle_1_s_idle_1_e"
 
-        if loadedAnimationNames.contains(idleAnimation),
-           let frames = baseFrameManager?.getFrames(for: idleAnimation), !frames.isEmpty {
+        if let frame0 = baseFrameManager?.loadSingleFrame(animationName: idleAnimation, frameIndex: 0) {
+            logStartupTiming("✅ Frame 0 loaded synchronously, size: \(frame0.size)")
 
-            let expectedCount = baseFrameManager?.getTotalFrames(for: idleAnimation) ?? frames.count
             newAnimationEngine?.loadBaseAnimation(
                 name: idleAnimation,
-                frames: frames,
-                expectedCount: expectedCount
+                frames: [frame0],
+                expectedCount: 50
             )
 
-            let elapsed = Date().timeIntervalSince(appStartTime)
-            print("🎉🎉🎉 [UI READY FROM CACHE] +\(String(format: "%.2f", elapsed))s - IDLE from cache! Starting rendering...")
-
-            // Start rendering IMMEDIATELY - don't wait for other animations
+            newAnimationEngine?.setAppStartTime(appStartTime)
             newAnimationEngine?.startRendering()
 
-            // Unlock UI
-            if !isReadyForInteraction {
-                isReadyForInteraction = true
-                DispatchQueue.main.async { [weak self] in
-                    self?.onReadyStateChange?(true)
-                }
-            }
-        }
+            logStartupTiming("🎉 Rendering started immediately!")
 
-        // DON'T load other animations at startup - load them lazily when backend requests them
-        // This prevents CPU spike and FPS drops
-        print("⏱️ [LAZY LOAD] Other cached animations will load on-demand when backend requests them")
+            isReadyForInteraction = true
+            onReadyStateChange?(true)
+        } else {
+            logStartupTiming("❌ Failed to load frame 0")
+            print("❌ Failed to load frame 0 from cache")
+        }
+    }
+
+    /// Create a simple test frame in memory (no disk I/O)
+    private func createTestFrame() -> UIImage {
+        let size = CGSize(width: 1280, height: 768)
+        let renderer = UIGraphicsImageRenderer(size: size)
+
+        return renderer.image { context in
+            // Draw a gradient background
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            // Draw some text
+            let text = "LIVA Test Frame"
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 60, weight: .bold),
+                .foregroundColor: UIColor.white
+            ]
+            let textSize = text.size(withAttributes: attributes)
+            let textRect = CGRect(
+                x: (size.width - textSize.width) / 2,
+                y: (size.height - textSize.height) / 2,
+                width: textSize.width,
+                height: textSize.height
+            )
+            text.draw(in: textRect, withAttributes: attributes)
+        }
     }
 
     private func notifyIdleReady() {
