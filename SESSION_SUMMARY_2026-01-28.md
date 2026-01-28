@@ -424,8 +424,13 @@ Set mode to IDLE → Start idle looping
 ### Known Issues:
 
 1. **Animation download time:** Cold start takes 2-3 minutes to download all base frames (~1.3MB each × 9 animations × ~46 frames each)
-2. **Socket ping timeout:** Socket disconnects after ~3 minutes of inactivity
+2. **Socket ping timeout:** Socket disconnects during animation downloads due to ping timeout (~3 min). The socket reconnects automatically but restarts animation download. **Root cause:** Backend ping timeout (60s) may be too aggressive during heavy frame downloads.
 3. **Frame logging to backend:** Not all frames being logged to session logs (low priority)
+4. **No persistent animation cache:** Animations must be re-downloaded on each app start/reconnect
+
+### Workaround for Testing:
+
+To successfully test, keep the app active and wait for all animations to complete before sending messages. Check logs for `Animation complete` messages (need 9-10 total).
 
 ### Remaining Tests:
 
