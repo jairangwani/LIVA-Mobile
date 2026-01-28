@@ -67,9 +67,8 @@ internal class LIVASocketManager(
             val options = IO.Options().apply {
                 forceNew = true
                 reconnection = false // We handle reconnection manually
-                // Use polling first for compatibility (WebSocket may fail in some environments)
-                // Socket.IO can upgrade to WebSocket after initial connection
-                transports = arrayOf("polling", "websocket")
+                // Use websocket for better compatibility with room-based emissions
+                transports = arrayOf("websocket")
                 query = "user_id=${configuration.userId}" +
                         "&agent_id=${configuration.agentId}" +
                         "&instance_id=${configuration.instanceId}" +
@@ -115,6 +114,12 @@ internal class LIVASocketManager(
 
     private fun setupEventHandlers() {
         val sock = socket ?: return
+
+        // DEBUG: Log ALL incoming events to diagnose which ones are being received
+        sock.onAnyIncoming { args ->
+            val eventName = args.firstOrNull()?.toString() ?: "unknown"
+            Log.d(TAG, ">>> INCOMING EVENT: $eventName (total args: ${args.size})")
+        }
 
         // Connection events
         sock.on(Socket.EVENT_CONNECT) {
@@ -195,13 +200,21 @@ internal class LIVASocketManager(
 
     private fun handleAudioEvent(args: Array<Any>) {
         try {
-            val data = args.firstOrNull() as? JSONObject ?: return
+            val data = args.firstOrNull() as? JSONObject ?: run {
+                Log.w(TAG, "receive_audio: No data in args")
+                return
+            }
+
+            val chunkIndex = data.optInt("chunk_index", -1)
+            Log.d(TAG, ">>> receive_audio event: chunk_index=$chunkIndex")
 
             val audioBase64 = data.optString("audio_data", "")
-            if (audioBase64.isEmpty()) return
+            if (audioBase64.isEmpty()) {
+                Log.w(TAG, "receive_audio: Empty audio_data for chunk $chunkIndex")
+                return
+            }
 
             val audioData = android.util.Base64.decode(audioBase64, android.util.Base64.DEFAULT)
-            val chunkIndex = data.optInt("chunk_index", 0)
             val masterChunkIndex = data.optInt("master_chunk_index", 0)
             val totalFrameImages = data.optInt("total_frame_images", 0)
             val timestamp = data.optString("timestamp", "")
@@ -254,7 +267,15 @@ internal class LIVASocketManager(
 
     private fun handleFrameBatchEvent(args: Array<Any>) {
         try {
-            val data = args.firstOrNull() as? JSONObject ?: return
+            Log.d(TAG, ">>> receive_frame_images_batch event received!")
+            val data = args.firstOrNull() as? JSONObject ?: run {
+                Log.w(TAG, "receive_frame_images_batch: No data in args")
+                return
+            }
+
+            // Log frame batch summary
+            val debugFramesArray = data.optJSONArray("frames")
+            Log.d(TAG, "Frame batch: chunk=${data.optInt("chunk_index")}, frames=${debugFramesArray?.length()}")
 
             val chunkIndex = data.optInt("chunk_index", 0)
             val batchIndex = data.optInt("batch_index", 0)
@@ -268,8 +289,52 @@ internal class LIVASocketManager(
             if (framesArray != null) {
                 for (i in 0 until framesArray.length()) {
                     val frameObj = framesArray.getJSONObject(i)
+
+                    // Parse coordinates array [x, y, width, height]
+                    val coordsArray = frameObj.optJSONArray("coordinates")
+                    val coordinates: List<Float>? = if (coordsArray != null && coordsArray.length() >= 4) {
+                        (0 until coordsArray.length()).map { coordsArray.optDouble(it, 0.0).toFloat() }
+                    } else {
+                        null
+                    }
+
+                    // Parse zone_top_left array (chunk-level fallback)
+                    val zoneArray = frameObj.optJSONArray("zone_top_left")
+                    val zoneTopLeft: List<Int>? = if (zoneArray != null && zoneArray.length() >= 2) {
+                        (0 until zoneArray.length()).map { zoneArray.optInt(it, 0) }
+                    } else {
+                        null
+                    }
+
+                    // Handle image_data which may come as String (base64) or byte[] (binary)
+                    // Socket.IO sends binary data which we can use directly (more efficient!)
+                    val imageDataValue = frameObj.opt("image_data")
+                    val imageBytes: ByteArray?
+                    val imageDataString: String
+
+                    when (imageDataValue) {
+                        is ByteArray -> {
+                            // Binary data received - use directly (skips base64 encode/decode)
+                            imageBytes = imageDataValue
+                            imageDataString = ""
+                            if (i == 0) Log.d(TAG, "Frame 0: Binary data received (${imageDataValue.size} bytes)")
+                        }
+                        is String -> {
+                            // Base64 string received
+                            imageBytes = null
+                            imageDataString = imageDataValue
+                            if (i == 0) Log.d(TAG, "Frame 0: Base64 string received (${imageDataValue.length} chars)")
+                        }
+                        else -> {
+                            Log.w(TAG, "Frame $i: Unexpected image_data type: ${imageDataValue?.javaClass?.name}")
+                            imageBytes = null
+                            imageDataString = ""
+                        }
+                    }
+
                     val frame = FrameData(
-                        imageData = frameObj.optString("image_data", ""),
+                        imageData = imageDataString,
+                        imageBytes = imageBytes,
                         imageMime = frameObj.optString("image_mime", "image/webp"),
                         spriteIndexFolder = frameObj.optInt("sprite_index_folder", 0),
                         sheetFilename = frameObj.optString("sheet_filename", ""),
@@ -278,7 +343,11 @@ internal class LIVASocketManager(
                         sectionIndex = frameObj.optInt("section_index", 0),
                         frameIndex = frameObj.optInt("frame_index", 0),
                         matchedSpriteFrameNumber = frameObj.optInt("matched_sprite_frame_number", 0),
-                        char = frameObj.optString("char", "")
+                        char = frameObj.optString("char", ""),
+                        // NEW: Parse overlay_id and coordinates for iOS-style rendering
+                        overlayId = frameObj.optString("overlay_id", null),
+                        coordinates = coordinates,
+                        zoneTopLeft = zoneTopLeft
                     )
                     frames.add(frame)
                 }

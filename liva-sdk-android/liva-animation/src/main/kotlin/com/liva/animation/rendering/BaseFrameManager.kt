@@ -241,6 +241,15 @@ class BaseFrameManager(private val context: Context) {
         return animations[animationName]?.getFrame(frameIndex)
     }
 
+    /**
+     * Get all loaded frames for an animation as a list.
+     * Used by AnimationEngine for base frame sync with overlay.
+     */
+    fun getAnimationFrames(animationName: String): List<Bitmap> {
+        val animation = animations[animationName] ?: return emptyList()
+        return animation.frames.filterNotNull()
+    }
+
     // MARK: - Loading State
 
     /**

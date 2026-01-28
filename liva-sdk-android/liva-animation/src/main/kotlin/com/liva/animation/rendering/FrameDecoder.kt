@@ -2,10 +2,12 @@ package com.liva.animation.rendering
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.RectF
 import android.util.Base64
 import android.util.LruCache
 import com.liva.animation.models.DecodedFrame
 import com.liva.animation.models.FrameBatch
+import com.liva.animation.models.FrameData
 import kotlinx.coroutines.*
 
 /**
@@ -142,32 +144,125 @@ internal class FrameDecoder {
         return imageCache.get(key) != null
     }
 
+    /**
+     * Get cached image by key.
+     */
+    fun getImage(key: String): Bitmap? {
+        return imageCache.get(key)
+    }
+
+    /**
+     * Check if first N frames are sequentially decoded and ready.
+     * Returns true only if frames 0 through minimumCount-1 are all ready.
+     */
+    fun areFirstFramesReady(keys: List<String>, minimumCount: Int): Boolean {
+        val checkCount = minOf(keys.size, minimumCount)
+        var readyCount = 0
+
+        for (i in 0 until checkCount) {
+            val key = keys.getOrNull(i) ?: break
+            if (isImageDecoded(key)) {
+                readyCount++
+            } else {
+                break  // Must be sequential - stop at first gap
+            }
+        }
+
+        return readyCount >= minimumCount
+    }
+
     // MARK: - Batch Decoding
 
     /**
-     * Decode a batch of frames.
+     * Decode a batch of frames with full metadata preservation.
+     * Preserves coordinates, matchedSpriteFrameNumber, overlayId, etc.
+     * Supports both raw bytes (efficient) and base64 strings (fallback).
      */
     suspend fun decodeBatch(batch: FrameBatch): List<DecodedFrame> = withContext(Dispatchers.Default) {
         val decodedFrames = mutableListOf<DecodedFrame>()
 
+        android.util.Log.d("FrameDecoder", "decodeBatch: chunk=${batch.chunkIndex}, frames=${batch.frames.size}")
+
         batch.frames.mapNotNull { frameData ->
             async {
-                // Use content-based cache keys
-                val (cacheKey, bitmap) = decodeWithContentKey(
-                    base64String = frameData.imageData,
-                    overlayId = frameData.overlayId,
-                    animationName = frameData.animationName,
-                    spriteNumber = frameData.spriteIndexFolder,
-                    sheetFilename = frameData.sheetFilename
-                )
+                // Check if we have any image data (bytes preferred, base64 fallback)
+                if (!frameData.hasImageData()) {
+                    android.util.Log.w("FrameDecoder", "No imageData for seq=${frameData.sequenceIndex}")
+                    return@async null
+                }
 
-                bitmap?.let {
-                    DecodedFrame(
-                        image = it,
+                // Generate content-based cache key
+                val cacheKey = frameData.overlayId
+                    ?: if (frameData.animationName.isNotEmpty() && frameData.sheetFilename.isNotEmpty()) {
+                        "${frameData.animationName}/${frameData.spriteIndexFolder}/${frameData.sheetFilename}"
+                    } else {
+                        "frame_${batch.chunkIndex}_${frameData.sequenceIndex}"
+                    }
+
+                // Check cache first
+                imageCache.get(cacheKey)?.let { cached ->
+                    return@async DecodedFrame(
+                        image = cached,
                         sequenceIndex = frameData.sequenceIndex,
-                        animationName = frameData.animationName
+                        animationName = frameData.animationName,
+                        coordinates = parseCoordinates(frameData.coordinates, frameData.zoneTopLeft),
+                        matchedSpriteFrameNumber = frameData.matchedSpriteFrameNumber,
+                        overlayId = cacheKey,
+                        sheetFilename = frameData.sheetFilename,
+                        char = frameData.char,
+                        sectionIndex = frameData.sectionIndex,
+                        originalFrameIndex = frameData.frameIndex
                     )
                 }
+
+                // Decode bitmap - prefer raw bytes (skips base64 decode)
+                val bitmap = if (frameData.imageBytes != null) {
+                    // Direct binary decode (efficient!)
+                    try {
+                        BitmapFactory.decodeByteArray(frameData.imageBytes, 0, frameData.imageBytes.size, options)
+                    } catch (e: Exception) {
+                        android.util.Log.w("FrameDecoder", "Failed to decode bytes for seq=${frameData.sequenceIndex}: ${e.message}")
+                        null
+                    }
+                } else {
+                    // Base64 decode fallback
+                    try {
+                        val base64 = if (frameData.imageData.contains("base64,")) {
+                            frameData.imageData.substringAfter("base64,")
+                        } else {
+                            frameData.imageData
+                        }
+                        val bytes = Base64.decode(base64, Base64.DEFAULT)
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                    } catch (e: Exception) {
+                        android.util.Log.w("FrameDecoder", "Failed to decode base64 for seq=${frameData.sequenceIndex}: ${e.message}")
+                        null
+                    }
+                }
+
+                if (bitmap == null) {
+                    android.util.Log.w("FrameDecoder", "Failed to decode bitmap for seq=${frameData.sequenceIndex}")
+                    return@async null
+                }
+
+                // Cache result
+                imageCache.put(cacheKey, bitmap)
+                synchronized(decodedKeysLock) {
+                    decodedKeys.add(cacheKey)
+                }
+
+                DecodedFrame(
+                    image = bitmap,
+                    sequenceIndex = frameData.sequenceIndex,
+                    animationName = frameData.animationName,
+                    coordinates = parseCoordinates(frameData.coordinates, frameData.zoneTopLeft),
+                    matchedSpriteFrameNumber = frameData.matchedSpriteFrameNumber,
+                    overlayId = cacheKey,
+                    sheetFilename = frameData.sheetFilename,
+                    char = frameData.char,
+                    sectionIndex = frameData.sectionIndex,
+                    originalFrameIndex = frameData.frameIndex
+                )
             }
         }.awaitAll().filterNotNull().let { frames ->
             decodedFrames.addAll(frames)
@@ -175,6 +270,32 @@ internal class FrameDecoder {
 
         // Sort by sequence index
         decodedFrames.sortedBy { it.sequenceIndex }
+    }
+
+    /**
+     * Parse coordinates from backend format.
+     * Backend sends either per-frame [x, y, width, height] or chunk-level zone_top_left.
+     */
+    private fun parseCoordinates(coords: List<Float>?, zoneTopLeft: List<Int>?): RectF {
+        // Prefer per-frame coordinates
+        if (coords != null && coords.size >= 4) {
+            return RectF(
+                coords[0],
+                coords[1],
+                coords[0] + coords[2],  // right = x + width
+                coords[1] + coords[3]   // bottom = y + height
+            )
+        }
+
+        // Fallback to chunk-level zone_top_left with default size
+        if (zoneTopLeft != null && zoneTopLeft.size >= 2) {
+            val x = zoneTopLeft[0].toFloat()
+            val y = zoneTopLeft[1].toFloat()
+            return RectF(x, y, x + 300f, y + 300f)  // Default 300x300 overlay size
+        }
+
+        // No position data
+        return RectF()
     }
 
     /**

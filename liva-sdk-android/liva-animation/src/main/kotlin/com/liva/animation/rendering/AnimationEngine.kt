@@ -2,8 +2,10 @@ package com.liva.animation.rendering
 
 import android.graphics.Bitmap
 import android.graphics.PointF
+import android.os.SystemClock
 import android.util.Log
 import com.liva.animation.models.DecodedFrame
+import com.liva.animation.models.OverlaySection
 import com.liva.animation.logging.SessionLogger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -44,9 +46,17 @@ data class QueuedAnimationChunk(
 )
 
 /**
- * Manages animation frame timing and queue.
+ * Manages animation frame timing, overlay sections, and audio-video sync.
+ * Implements iOS-style buffer readiness, jitter prevention, and time-based advancement.
  */
 internal class AnimationEngine {
+
+    companion object {
+        // Match iOS/Web buffer requirements
+        const val MIN_FRAMES_BEFORE_START = 30
+        const val TARGET_FPS = 30.0
+        const val FRAME_INTERVAL_MS = 1000.0 / TARGET_FPS  // 33.33ms
+    }
 
     // MARK: - Properties
 
@@ -59,12 +69,36 @@ internal class AnimationEngine {
     // Session logging
     private var sessionId: String? = null
     private var totalRenderedFrames = 0
-    private var currentChunkIndex = 0
-    private var currentSequenceIndex = 0
 
-    // Skip-frame-on-wait logic
-    private var shouldSkipFrameAdvance = false
-    private var lastRenderFrame: RenderFrame? = null
+    // Frame decoder reference for decode-readiness checks
+    private var frameDecoder: FrameDecoder? = null
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // NEW: Overlay Section State Tracking (matches iOS)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // Queued overlay sections waiting to play
+    private val overlayQueue = mutableListOf<OverlaySection>()
+    private val overlayQueueLock = ReentrantLock()
+
+    // Currently playing overlay section
+    private var currentOverlaySection: OverlaySection? = null
+
+    // Jitter fix: Hold last frame while waiting for next section buffer
+    private var holdingLastFrame = false
+    private var lastHeldFrame: DecodedFrame? = null
+
+    // Previous frame for skip-draw-on-wait
+    private var previousRenderFrame: RenderFrame? = null
+
+    // Time-based frame advancement
+    private var overlayStartTime: Long = 0
+    private var lastAdvanceTime: Long = 0
+    private var frameAccumulator = 0.0
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Legacy frame queue (kept for compatibility, will migrate to overlay sections)
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private val frameQueue = mutableListOf<DecodedFrame>()
     private val queueLock = ReentrantLock()
@@ -80,8 +114,6 @@ internal class AnimationEngine {
     private var baseFrameManager: BaseFrameManager? = null
     private var overlayPosition = PointF(0f, 0f)
 
-    private val bufferThreshold = 10
-
     // MARK: - Callbacks
 
     var onModeChange: ((AnimationMode) -> Unit)? = null
@@ -90,6 +122,9 @@ internal class AnimationEngine {
 
     // Audio-video sync callback (triggers audio playback when first frame renders)
     var onStartAudioForChunk: ((chunkIndex: Int, audioData: ByteArray) -> Unit)? = null
+
+    // All chunks complete callback (like iOS animationEngineDidFinishAllChunks)
+    var onAllChunksComplete: (() -> Unit)? = null
 
     // MARK: - Audio Sync State
 
@@ -102,8 +137,19 @@ internal class AnimationEngine {
 
     // MARK: - Configuration
 
-    var minimumBufferFrames: Int = 10
+    var minimumBufferFrames: Int = MIN_FRAMES_BEFORE_START
     var loopIdleAnimations: Boolean = true
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - Initialization
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Set frame decoder for decode-readiness checks.
+     */
+    fun setFrameDecoder(decoder: FrameDecoder) {
+        this.frameDecoder = decoder
+    }
 
     /**
      * Set session ID for logging
@@ -112,6 +158,10 @@ internal class AnimationEngine {
         this.sessionId = sessionId
         Log.d(TAG, "Session ID set for frame logging: $sessionId")
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - Audio Queue Management
+    // ═══════════════════════════════════════════════════════════════════════════
 
     /**
      * Queue audio data for a chunk (don't play immediately - wait for animation sync)
@@ -135,17 +185,329 @@ internal class AnimationEngine {
         }
     }
 
-    // MARK: - Frame Queue Management
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - NEW: Overlay Section Management (iOS-style)
+    // ═══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Enqueue decoded frames for playback.
+     * Enqueue an overlay section for playback.
+     * Matches iOS enqueueOverlaySet().
+     */
+    fun enqueueOverlaySection(section: OverlaySection) {
+        overlayQueueLock.withLock {
+            overlayQueue.add(section)
+            overlayQueue.sortBy { it.chunkIndex }
+            Log.d(TAG, "Enqueued overlay section: chunk=${section.chunkIndex}, frames=${section.frames.size}")
+        }
+
+        // If not currently playing, try to start
+        if (currentOverlaySection == null && mode != AnimationMode.TALKING) {
+            tryStartNextSection()
+        }
+    }
+
+    /**
+     * Check if overlay section buffer is ready (30+ frames decoded).
+     * Matches iOS isBufferReady().
+     */
+    private fun isBufferReady(section: OverlaySection): Boolean {
+        val decoder = frameDecoder ?: return true  // If no decoder, assume ready
+
+        val requiredFrames = minOf(MIN_FRAMES_BEFORE_START, section.totalFrames)
+        val keys = section.frames.take(requiredFrames).mapNotNull { it.overlayId }
+
+        return decoder.areFirstFramesReady(keys, requiredFrames)
+    }
+
+    /**
+     * Try to start the next queued overlay section.
+     */
+    private fun tryStartNextSection() {
+        val nextSection = overlayQueueLock.withLock {
+            overlayQueue.firstOrNull()
+        } ?: return
+
+        // Check buffer readiness
+        if (!isBufferReady(nextSection)) {
+            Log.d(TAG, "⏳ Waiting for buffer: chunk=${nextSection.chunkIndex}, need $MIN_FRAMES_BEFORE_START frames")
+            return
+        }
+
+        // Remove from queue and set as current
+        overlayQueueLock.withLock {
+            overlayQueue.removeFirstOrNull()
+        }
+
+        // Initialize playback state
+        nextSection.playing = true
+        nextSection.currentDrawingFrame = 0
+        nextSection.startTime = SystemClock.elapsedRealtime()
+        nextSection.done = false
+        nextSection.holdingLastFrame = false
+
+        currentOverlaySection = nextSection
+        currentAnimationName = nextSection.animationName
+        overlayPosition = PointF(nextSection.zoneTopLeft.first.toFloat(), nextSection.zoneTopLeft.second.toFloat())
+
+        // Reset time-based advancement
+        overlayStartTime = SystemClock.elapsedRealtime()
+        lastAdvanceTime = overlayStartTime
+        frameAccumulator = 0.0
+
+        // Switch to talking mode
+        setMode(AnimationMode.TALKING)
+
+        Log.d(TAG, "▶️ Started overlay section: chunk=${nextSection.chunkIndex}, frames=${nextSection.frames.size}")
+    }
+
+    /**
+     * Check if we should hold the last frame (jitter fix).
+     * Prevents blank frame between chunks.
+     */
+    private fun shouldHoldLastFrame(): Boolean {
+        val section = currentOverlaySection ?: return false
+
+        // At or past last frame?
+        if (section.currentDrawingFrame >= section.frames.size - 1) {
+            // Check if next section exists and is buffered
+            val nextSection = overlayQueueLock.withLock {
+                overlayQueue.firstOrNull()
+            }
+
+            if (nextSection != null && !isBufferReady(nextSection)) {
+                section.holdingLastFrame = true
+                Log.d(TAG, "⏸️ Holding last frame - waiting for chunk ${nextSection.chunkIndex} buffer")
+                return true
+            }
+        }
+
+        return false
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - Frame Retrieval
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Get the next frame for rendering.
+     * Implements skip-draw-on-wait, buffer readiness, and time-based advancement.
+     */
+    fun getNextFrame(): RenderFrame? {
+        val currentTime = SystemClock.elapsedRealtime()
+
+        // Handle idle mode
+        if (mode == AnimationMode.IDLE) {
+            val idleFrame = getIdleFrame(currentTime)
+            previousRenderFrame = idleFrame
+            return idleFrame
+        }
+
+        // TALKING mode - use overlay sections
+        val section = currentOverlaySection
+
+        if (section == null) {
+            // No active section - try to start one
+            tryStartNextSection()
+            return previousRenderFrame ?: getIdleFrame(currentTime)
+        }
+
+        // Time-based frame advancement
+        val deltaTime = currentTime - lastAdvanceTime
+        lastAdvanceTime = currentTime
+        frameAccumulator += deltaTime
+
+        // Advance frames based on accumulated time
+        while (frameAccumulator >= FRAME_INTERVAL_MS && !section.done) {
+            frameAccumulator -= FRAME_INTERVAL_MS
+
+            // Check jitter fix - hold last frame if next chunk not ready
+            if (shouldHoldLastFrame()) {
+                frameAccumulator = 0.0
+                break
+            }
+
+            section.currentDrawingFrame++
+
+            // Check if section complete
+            if (section.currentDrawingFrame >= section.frames.size) {
+                section.done = true
+                onSectionComplete(section)
+                break
+            }
+        }
+
+        // Get current frame
+        val frameIndex = minOf(section.currentDrawingFrame, section.frames.size - 1)
+        val currentFrame = section.frames.getOrNull(frameIndex)
+
+        if (currentFrame == null) {
+            return previousRenderFrame ?: getIdleFrame(currentTime)
+        }
+
+        // SKIP-DRAW-ON-WAIT: If overlay not decoded, hold previous frame
+        val cacheKey = currentFrame.overlayId
+        if (cacheKey != null && frameDecoder?.isImageDecoded(cacheKey) == false) {
+            Log.d(TAG, "⏸️ Skip-draw: overlay not decoded, key=$cacheKey")
+            return previousRenderFrame ?: getIdleFrame(currentTime)
+        }
+
+        // Get base frame synced with overlay
+        val baseImage = getBaseFrameForOverlay(currentFrame)
+
+        // Trigger audio on first frame
+        if (section.currentDrawingFrame == 0 && !section.audioStarted) {
+            section.audioStarted = true
+            triggerAudioForChunk(section.chunkIndex)
+        }
+
+        // Build render frame
+        val renderFrame = RenderFrame(
+            baseImage = baseImage,
+            overlayImage = currentFrame.image,
+            overlayPosition = PointF(currentFrame.coordinates.left, currentFrame.coordinates.top),
+            timestamp = currentTime
+        )
+
+        previousRenderFrame = renderFrame
+
+        // Log frame
+        logRenderedFrame(section, currentFrame)
+
+        return renderFrame
+    }
+
+    /**
+     * Get base frame that syncs with the current overlay.
+     * Uses matchedSpriteFrameNumber for proper lip sync.
+     */
+    private fun getBaseFrameForOverlay(overlay: DecodedFrame): Bitmap? {
+        val manager = baseFrameManager ?: return baseFrame
+
+        // Get base animation frames
+        val animName = overlay.animationName.ifEmpty { currentAnimationName }
+        val baseFrames = manager.getAnimationFrames(animName)
+
+        if (baseFrames.isEmpty()) {
+            // Fallback to idle
+            return manager.getCurrentIdleFrame() ?: baseFrame
+        }
+
+        // Use matchedSpriteFrameNumber to sync
+        val baseFrameIndex = overlay.matchedSpriteFrameNumber % baseFrames.size
+        return baseFrames.getOrNull(baseFrameIndex) ?: manager.getCurrentIdleFrame() ?: baseFrame
+    }
+
+    /**
+     * Handle overlay section completion.
+     */
+    private fun onSectionComplete(section: OverlaySection) {
+        Log.d(TAG, "✅ Section complete: chunk=${section.chunkIndex}")
+        onChunkComplete?.invoke(section.chunkIndex)
+
+        // Try to start next section
+        val hasNext = overlayQueueLock.withLock { overlayQueue.isNotEmpty() }
+
+        if (hasNext) {
+            currentOverlaySection = null
+            tryStartNextSection()
+        } else {
+            // All chunks complete - transition to idle
+            Log.d(TAG, "🎉 All overlay chunks complete - transitioning to idle")
+            currentOverlaySection = null
+            transitionToIdle()
+            onAllChunksComplete?.invoke()
+        }
+    }
+
+    /**
+     * Trigger audio playback for a chunk.
+     */
+    private fun triggerAudioForChunk(chunkIndex: Int) {
+        if (audioStartedForChunk.contains(chunkIndex)) {
+            return
+        }
+
+        val audioData = audioChunkLock.withLock {
+            pendingAudioChunks[chunkIndex]
+        }
+
+        if (audioData != null) {
+            audioStartedForChunk.add(chunkIndex)
+            onStartAudioForChunk?.invoke(chunkIndex, audioData)
+            Log.d(TAG, "🔊 Started audio for chunk $chunkIndex - IN SYNC with first overlay frame")
+        }
+    }
+
+    /**
+     * Log rendered frame to session logger.
+     */
+    private fun logRenderedFrame(section: OverlaySection, frame: DecodedFrame) {
+        if (sessionId == null) return
+
+        totalRenderedFrames++
+
+        val currentTime = SystemClock.elapsedRealtime()
+        val deltaTime = currentTime - lastFrameTime
+        lastFrameTime = currentTime
+        val fps = if (deltaTime > 0) 1000.0 / deltaTime else 0.0
+
+        SessionLogger.getInstance().logFrame(
+            chunk = section.chunkIndex,
+            seq = frame.sequenceIndex,
+            anim = frame.animationName,
+            baseFrame = frame.matchedSpriteFrameNumber,
+            overlayKey = frame.overlayId ?: "unknown",
+            syncStatus = "SYNC",
+            fps = fps,
+            sprite = frame.matchedSpriteFrameNumber,
+            char = frame.char,
+            buffer = "${section.frames.size - section.currentDrawingFrame}/${section.totalFrames}",
+            nextChunk = overlayQueueLock.withLock { overlayQueue.firstOrNull()?.let { "${it.frames.size}" } ?: "none" }
+        )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - Idle Frame Management
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Get frame for idle animation from base frame manager.
+     */
+    private fun getIdleFrame(timestamp: Long): RenderFrame {
+        val manager = baseFrameManager
+        if (manager == null) {
+            return RenderFrame(
+                baseImage = baseFrame,
+                overlayImage = null,
+                overlayPosition = PointF(0f, 0f),
+                timestamp = timestamp
+            )
+        }
+
+        val idleFrame = manager.advanceFrame()
+        val frameToUse = idleFrame ?: manager.getCurrentIdleFrame() ?: baseFrame
+
+        return RenderFrame(
+            baseImage = frameToUse,
+            overlayImage = null,
+            overlayPosition = PointF(0f, 0f),
+            timestamp = timestamp
+        )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - Legacy Frame Queue (for backward compatibility)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Enqueue decoded frames for playback (legacy method).
      */
     fun enqueueFrames(frames: List<DecodedFrame>, chunkIndex: Int) {
         queueLock.withLock {
             frameQueue.addAll(frames)
             frameQueue.sortBy { it.sequenceIndex }
 
-            if (frameQueue.size >= bufferThreshold && !isPlaying) {
+            if (frameQueue.size >= minimumBufferFrames && !isPlaying) {
                 isPlaying = true
                 setMode(AnimationMode.TALKING)
             }
@@ -153,7 +515,7 @@ internal class AnimationEngine {
     }
 
     /**
-     * Add a chunk to the queue.
+     * Add a chunk to the queue (legacy method).
      */
     fun enqueueChunk(chunk: QueuedAnimationChunk) {
         chunkLock.withLock {
@@ -163,7 +525,7 @@ internal class AnimationEngine {
     }
 
     /**
-     * Mark a chunk as ready.
+     * Mark a chunk as ready (legacy method).
      */
     fun markChunkReady(chunkIndex: Int) {
         chunkLock.withLock {
@@ -171,15 +533,30 @@ internal class AnimationEngine {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - State Management
+    // ═══════════════════════════════════════════════════════════════════════════
+
     /**
-     * Set the overlay position.
+     * Set animation mode.
+     */
+    fun setMode(newMode: AnimationMode) {
+        if (mode != newMode) {
+            mode = newMode
+            onModeChange?.invoke(newMode)
+            Log.d(TAG, "Mode changed to: $newMode")
+        }
+    }
+
+    /**
+     * Set overlay position (legacy).
      */
     fun setOverlayPosition(position: PointF) {
         overlayPosition = position
     }
 
     /**
-     * Set the base frame.
+     * Set base frame (legacy).
      */
     fun setBaseFrame(frame: Bitmap?) {
         baseFrame = frame
@@ -193,301 +570,104 @@ internal class AnimationEngine {
     }
 
     /**
-     * Set animation mode.
+     * Transition to idle and clear all state.
+     * Implements iOS forceIdleNow() behavior.
      */
-    fun setMode(newMode: AnimationMode) {
-        if (mode != newMode) {
-            mode = newMode
-            onModeChange?.invoke(newMode)
+    fun transitionToIdle() {
+        // Clear overlay sections
+        overlayQueueLock.withLock {
+            overlayQueue.clear()
         }
+        currentOverlaySection = null
+
+        // Clear legacy frame queue
+        queueLock.withLock {
+            frameQueue.clear()
+            currentFrameIndex = 0
+        }
+        chunkLock.withLock {
+            chunkQueue.clear()
+        }
+
+        // Clear audio state
+        clearAudioQueue()
+
+        // Reset state
+        holdingLastFrame = false
+        lastHeldFrame = null
+        previousRenderFrame = null
+        isPlaying = false
+
+        // Switch to idle
+        baseFrameManager?.switchAnimation("idle_1_s_idle_1_e", 0)
+        setMode(AnimationMode.IDLE)
+
+        Log.d(TAG, "💤 Transitioned to idle - all state cleared")
+    }
+
+    /**
+     * Force immediate transition to idle (matches iOS forceIdleNow).
+     */
+    fun forceIdleNow() {
+        Log.d(TAG, "🔄 forceIdleNow - clearing all caches and state")
+        transitionToIdle()
+        frameDecoder?.clearAllOverlays()
     }
 
     /**
      * Clear all queued frames.
      */
     fun clearQueue() {
+        overlayQueueLock.withLock {
+            overlayQueue.clear()
+        }
+        currentOverlaySection = null
+
         queueLock.withLock {
-            frameQueue.forEach { it.image.recycle() }
             frameQueue.clear()
             currentFrameIndex = 0
         }
-
         chunkLock.withLock {
             chunkQueue.clear()
         }
-
         isPlaying = false
     }
 
-    /**
-     * Transition to idle.
-     * Implements simple iOS-style direct switching (no transition animations).
-     */
-    fun transitionToIdle() {
-        queueLock.withLock {
-            // Clear talking animation frames
-            frameQueue.forEach { it.image.recycle() }
-            frameQueue.clear()
-            currentFrameIndex = 0
-        }
-
-        // Clear audio state
-        clearAudioQueue()
-
-        // Switch base frame manager back to idle animation
-        baseFrameManager?.switchAnimation("idle_1_s_idle_1_e", 0)
-
-        // Set mode to idle
-        setMode(AnimationMode.IDLE)
-
-        // Reset playing flag
-        isPlaying = false
-
-        Log.d(TAG, "💤 Transitioned to idle - frames cleared, audio stopped, base animation reset")
-    }
-
-    // MARK: - Frame Retrieval
-
-    /**
-     * Get the next frame for rendering.
-     */
-    fun getNextFrame(): RenderFrame? {
-        val currentTime = System.currentTimeMillis()
-
-        // Reset skip flag
-        shouldSkipFrameAdvance = false
-
-        if (currentTime - lastFrameTime < mode.frameIntervalMs) {
-            return getCurrentRenderFrame(currentTime)
-        }
-
-        lastFrameTime = currentTime
-
-        // Handle idle mode with base frame manager
-        if (mode == AnimationMode.IDLE) {
-            val idleFrame = getIdleFrame(currentTime)
-            if (idleFrame.baseImage == null) {
-                Log.w(TAG, "getNextFrame IDLE returning NULL baseImage!")
-            }
-            lastRenderFrame = idleFrame
-            return idleFrame
-        }
-
-        // Get current base frame from manager
-        val currentBaseFrame = baseFrameManager?.getCurrentIdleFrame() ?: baseFrame
-        if (currentBaseFrame == null) {
-            Log.w(TAG, "getNextFrame TALKING: currentBaseFrame is NULL (manager=${baseFrameManager != null}, baseFrame=${baseFrame != null})")
-        }
-
-        var overlayImage: Bitmap? = null
-
-        queueLock.withLock {
-            if (frameQueue.isNotEmpty()) {
-                if (currentFrameIndex < frameQueue.size) {
-                    overlayImage = frameQueue[currentFrameIndex].image
-
-                    // AUDIO-VIDEO SYNC: Trigger audio when first overlay frame is about to render
-                    if (currentFrameIndex == 0 && mode == AnimationMode.TALKING) {
-                        triggerAudioForCurrentChunk()
-                    }
-
-                    currentFrameIndex++
-                }
-
-                if (currentFrameIndex >= frameQueue.size) {
-                    if (mode == AnimationMode.TALKING) {
-                        if (hasMoreChunks()) {
-                            loadNextChunk()
-                        } else {
-                            currentFrameIndex = frameQueue.size - 1
-                            overlayImage = frameQueue.lastOrNull()?.image
-                        }
-                    }
-                }
-            }
-        }
-
-        val renderFrame = RenderFrame(
-            baseImage = currentBaseFrame,
-            overlayImage = overlayImage,
-            overlayPosition = overlayPosition,
-            timestamp = currentTime
-        )
-
-        // Cache for skip-frame scenarios
-        lastRenderFrame = renderFrame
-
-        // Log rendered frame to session logger
-        if (sessionId != null && overlayImage != null) {
-            totalRenderedFrames++
-
-            // Calculate FPS
-            val deltaTime = currentTime - lastFrameTime
-            val fps = if (deltaTime > 0) 1000.0 / deltaTime else 0.0
-
-            SessionLogger.getInstance().logFrame(
-                chunk = currentChunkIndex,
-                seq = currentSequenceIndex,
-                anim = currentAnimationName,
-                baseFrame = 0,  // TODO: Get actual base frame index
-                overlayKey = "overlay_${currentFrameIndex}",  // TODO: Get actual overlay key
-                syncStatus = "SYNC",
-                fps = fps
-            )
-        }
-
-        return renderFrame
-    }
-
-    /**
-     * Trigger audio playback for current chunk (if not already started).
-     * Called when first overlay frame is about to render - ensures audio-video sync.
-     */
-    private fun triggerAudioForCurrentChunk() {
-        // Check if audio already started for this chunk
-        if (audioStartedForChunk.contains(currentChunkIndex)) {
-            return
-        }
-
-        // Get queued audio data for this chunk
-        val audioData = audioChunkLock.withLock {
-            pendingAudioChunks[currentChunkIndex]
-        }
-
-        if (audioData != null) {
-            // Mark as started
-            audioStartedForChunk.add(currentChunkIndex)
-
-            // Trigger callback to play audio (synchronized with first frame)
-            onStartAudioForChunk?.invoke(currentChunkIndex, audioData)
-
-            Log.d(TAG, "🔊 Started audio for chunk $currentChunkIndex - IN SYNC with first overlay frame")
-        } else {
-            Log.w(TAG, "No audio data queued for chunk $currentChunkIndex")
-        }
-    }
-
-    /**
-     * Get frame for idle animation from base frame manager.
-     */
-    private fun getIdleFrame(timestamp: Long): RenderFrame {
-        val manager = baseFrameManager
-        if (manager == null) {
-            // Fallback to static base frame
-            Log.w(TAG, "getIdleFrame: No baseFrameManager, using static baseFrame=${baseFrame != null}")
-            return RenderFrame(
-                baseImage = baseFrame,
-                overlayImage = null,
-                overlayPosition = PointF(0f, 0f),
-                timestamp = timestamp
-            )
-        }
-
-        // Advance and get next idle frame (10fps handled by mode.frameIntervalMs)
-        val idleFrame = manager.advanceFrame()
-
-        // Use the new frame, or fall back to current frame, or fall back to static baseFrame
-        // This ensures we NEVER return null for the base image
-        val frameToUse = idleFrame
-            ?: manager.getCurrentIdleFrame()
-            ?: baseFrame
-
-        if (frameToUse == null) {
-            Log.w(TAG, "getIdleFrame: ALL FALLBACKS FAILED! advanceFrame=${idleFrame != null}, getCurrentIdleFrame=${manager.getCurrentIdleFrame() != null}, baseFrame=${baseFrame != null}")
-        }
-
-        return RenderFrame(
-            baseImage = frameToUse,
-            overlayImage = null,
-            overlayPosition = PointF(0f, 0f),
-            timestamp = timestamp
-        )
-    }
-
-    /**
-     * Get current render frame without advancing (between frame intervals).
-     * BUG FIX: Now properly uses baseFrameManager instead of just baseFrame.
-     */
-    private fun getCurrentRenderFrame(timestamp: Long): RenderFrame? {
-        // Get base frame from manager (like getIdleFrame does) - FIXED BUG!
-        val manager = baseFrameManager
-        val currentBaseFrame = manager?.getCurrentIdleFrame() ?: baseFrame
-
-        if (currentBaseFrame == null) {
-            Log.w(TAG, "getCurrentRenderFrame: NULL baseFrame! manager=${manager != null}, baseFrame=${baseFrame != null}")
-        }
-
-        queueLock.withLock {
-            val overlayImage = when {
-                frameQueue.isEmpty() -> null
-                currentFrameIndex < frameQueue.size -> frameQueue[currentFrameIndex].image
-                frameQueue.isNotEmpty() -> frameQueue.last().image
-                else -> null
-            }
-
-            return RenderFrame(
-                baseImage = currentBaseFrame,
-                overlayImage = overlayImage,
-                overlayPosition = overlayPosition,
-                timestamp = timestamp
-            )
-        }
-    }
-
-    // MARK: - Chunk Management
-
-    private fun hasMoreChunks(): Boolean {
-        chunkLock.withLock {
-            return chunkQueue.isNotEmpty() && chunkQueue.first().isReady
-        }
-    }
-
-    private fun loadNextChunk() {
-        val nextChunk: QueuedAnimationChunk
-
-        chunkLock.withLock {
-            if (chunkQueue.isEmpty() || !chunkQueue.first().isReady) return
-            nextChunk = chunkQueue.removeAt(0)
-        }
-
-        queueLock.withLock {
-            val overlapFrames = minOf(5, frameQueue.size)
-            if (overlapFrames > 0) {
-                val keep = frameQueue.takeLast(overlapFrames)
-                frameQueue.clear()
-                frameQueue.addAll(keep)
-                currentFrameIndex = 0
-            } else {
-                frameQueue.clear()
-                currentFrameIndex = 0
-            }
-
-            frameQueue.addAll(nextChunk.frames)
-            overlayPosition = nextChunk.overlayPosition
-            currentAnimationName = nextChunk.animationName
-        }
-
-        onChunkComplete?.invoke(nextChunk.chunkIndex)
-    }
-
+    // ═══════════════════════════════════════════════════════════════════════════
     // MARK: - Buffer Status
+    // ═══════════════════════════════════════════════════════════════════════════
 
     val hasBufferedFrames: Boolean
-        get() = queueLock.withLock { frameQueue.size >= minimumBufferFrames }
-
-    val queuedFrameCount: Int
-        get() = queueLock.withLock { frameQueue.size }
-
-    val pendingChunkCount: Int
-        get() = chunkLock.withLock { chunkQueue.size }
-
-    val playbackProgress: Float
-        get() = queueLock.withLock {
-            if (frameQueue.isEmpty()) 0f
-            else currentFrameIndex.toFloat() / frameQueue.size
+        get() {
+            val section = currentOverlaySection
+            if (section != null) {
+                return isBufferReady(section)
+            }
+            return queueLock.withLock { frameQueue.size >= minimumBufferFrames }
         }
 
+    val queuedFrameCount: Int
+        get() {
+            val section = currentOverlaySection
+            if (section != null) {
+                return section.frames.size - section.currentDrawingFrame
+            }
+            return queueLock.withLock { frameQueue.size }
+        }
+
+    val pendingChunkCount: Int
+        get() = overlayQueueLock.withLock { overlayQueue.size } + chunkLock.withLock { chunkQueue.size }
+
+    val playbackProgress: Float
+        get() {
+            val section = currentOverlaySection ?: return 0f
+            if (section.frames.isEmpty()) return 0f
+            return section.currentDrawingFrame.toFloat() / section.frames.size
+        }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // MARK: - Playback Control
+    // ═══════════════════════════════════════════════════════════════════════════
 
     fun play() {
         isPlaying = true
@@ -505,5 +685,5 @@ internal class AnimationEngine {
     }
 
     val isCurrentlyPlaying: Boolean
-        get() = isPlaying
+        get() = isPlaying || currentOverlaySection != null
 }

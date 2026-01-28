@@ -33,8 +33,19 @@ LIVA-Mobile/
 │           ├── Models/                        # Data models
 │           ├── Networking/                    # Socket.IO, HTTP
 │           └── UI/                            # SwiftUI views
-├── liva-sdk-android/                          # Android SDK (future)
-├── liva-flutter/                              # Flutter SDK (future)
+├── liva-sdk-android/                          # Android SDK (Kotlin)
+│   └── LIVAAnimationSDK/
+│       └── livaanimation/
+│           └── src/main/java/com/liva/livaanimation/
+│               ├── LIVAClient.kt              # Main SDK entry point
+│               ├── core/                       # Animation engine
+│               ├── network/                    # Socket.IO, HTTP
+│               ├── audio/                      # Audio playback
+│               └── models/                     # Data models
+├── liva-android-app/                          # Native Android test app
+│   └── app/src/main/java/com/liva/testapp/
+│       └── MainActivity.kt                    # Test app entry point
+├── liva-flutter/                              # Flutter SDK (future, DO NOT USE FOR ANDROID)
 └── CLAUDE.md                                  # This file
 ```
 
@@ -417,6 +428,212 @@ The iOS SDK implements batched async frame processing to prevent main thread blo
 Missing animations will cause frame skipping. Check for `MISSING_BASE_ANIM` events in logs. Ensure all animations load before sending first message (~30-40 seconds after app start).
 
 See: [docs/IOS_ASYNC_PROCESSING_PLAN.md](docs/IOS_ASYNC_PROCESSING_PLAN.md) for full implementation details.
+
+---
+
+---
+
+## Android SDK (Native Kotlin)
+
+**IMPORTANT: Use native Android SDK, NOT Flutter for Android testing.**
+
+### Quick Start (Android)
+
+```bash
+cd LIVA-Mobile/liva-android-app
+
+# Build and install
+./gradlew installDebug
+
+# Or open in Android Studio
+# File > Open > select liva-android-app folder
+```
+
+**Requires:** Backend running on http://10.0.2.2:5003 (Android emulator localhost)
+
+### Project Structure
+
+```
+liva-sdk-android/
+└── LIVAAnimationSDK/
+    └── livaanimation/
+        └── src/main/java/com/liva/livaanimation/
+            ├── LIVAClient.kt           # Main SDK entry point
+            ├── LIVAConfig.kt           # Configuration
+            ├── core/
+            │   ├── LIVAAnimationEngine.kt  # Animation rendering
+            │   └── FrameDecoder.kt         # Image decoding
+            ├── network/
+            │   └── WebSocketManager.kt     # Socket.IO connection
+            ├── audio/
+            │   └── AudioPlayer.kt          # Audio playback
+            └── models/
+                └── AnimationModels.kt      # Data classes
+
+liva-android-app/                    # Test app
+└── app/src/main/java/com/liva/testapp/
+    └── MainActivity.kt              # Test app (instanceId: "android_test")
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `LIVAClient.kt` | Main SDK class, manages connection and session |
+| `LIVAAnimationEngine.kt` | View-based animation rendering |
+| `WebSocketManager.kt` | Socket.IO connection (Dyte library) |
+| `AudioPlayer.kt` | Audio playback with ExoPlayer |
+
+### Testing Android
+
+**Use native test app, NOT Flutter:**
+
+```bash
+# 1. Start backend
+cd AnnaOS-API && python main.py
+
+# 2. Start Android emulator
+emulator -avd Pixel_7_API_34  # or any AVD
+
+# 3. Install and run test app
+cd LIVA-Mobile/liva-android-app
+./gradlew installDebug
+adb shell am start -n com.liva.testapp/.MainActivity
+
+# 4. Send test message (use instance_id: "android_test")
+curl -X POST http://localhost:5003/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "test_user_android",
+    "agent_id": "1",
+    "instance_id": "android_test",
+    "message": "Hello from test script"
+  }'
+```
+
+### Android Socket.IO Library
+
+Uses Dyte's SocketIO-Kotlin library (NOT official Java client):
+
+```kotlin
+// build.gradle
+implementation("io.dyte:socketio-kotlin:1.0.8")
+```
+
+**Why Dyte library:**
+- Works correctly with Flask-SocketIO 5.x
+- Proper namespace handling
+- Kotlin-native API
+
+### Critical Instance ID Note
+
+The Android test app uses `instanceId = "android_test"`:
+
+```kotlin
+// MainActivity.kt
+livaClient.connect(
+    userId = "test_user_android",
+    agentId = "1",
+    instanceId = "android_test"  // MUST match when sending test messages
+)
+```
+
+Room name format: `{user_id}-{agent_id}-instance-{instance_id}`
+Example: `test_user_android-1-instance-android_test`
+
+---
+
+## CRITICAL: Backend Socket.IO Emit Pattern (2026-01-28)
+
+### The Problem
+
+**Android clients DO NOT receive events** emitted with `socketio.emit()` from background greenlets.
+
+Events from socket handlers (like `receive_base_frame`) work fine.
+Events from background greenlets (like `receive_audio`, `receive_frame_images_batch`) do NOT reach Android.
+
+### Root Cause
+
+Flask-SocketIO's `socketio.emit()` requires socket handler context. When called from an `eventlet.spawn()` greenlet (background processing), it silently fails for some clients (Android in particular).
+
+### The Fix
+
+**Use `socketio.server.emit()` with explicit `namespace='/'` for ALL emissions from background greenlets:**
+
+```python
+# WRONG - Works for web, but NOT for Android from background greenlets
+socketio.emit('receive_audio', data, room=room_name)
+
+# CORRECT - Works for ALL clients (web, iOS, Android)
+socketio.server.emit('receive_audio', data, room=room_name, namespace='/')
+```
+
+### Files Modified
+
+- `AnnaOS-API/managers/stream_handler.py` - All emit calls updated
+- `AnnaOS-API/managers/main_stream_manager.py` - All emit calls updated
+
+### Events Affected
+
+These events are emitted from background greenlets and MUST use `socketio.server.emit()`:
+
+| Event | File | Purpose |
+|-------|------|---------|
+| `receive_audio` | stream_handler.py | Audio chunk + animation data |
+| `receive_frame_images_batch` | stream_handler.py | Overlay images |
+| `chunk_images_ready` | stream_handler.py | Images ready signal |
+| `receive_frame_image` | stream_handler.py | Single frame (legacy) |
+| `new_image` | main_stream_manager.py | Generated images |
+| `play_base_animation` | main_stream_manager.py | Idle transition |
+| `audio_end` | main_stream_manager.py | Processing complete |
+| `new_message` | main_stream_manager.py | Text messages |
+
+### How to Debug
+
+1. Add a test emit in socket handler (like `connect_user`):
+   ```python
+   socketio.emit('test_ping', {'msg': 'from handler'}, room=room_name)
+   ```
+   This WILL reach Android.
+
+2. Add same emit from background greenlet:
+   ```python
+   socketio.emit('test_ping', {'msg': 'from greenlet'}, room=room_name)
+   ```
+   This will NOT reach Android.
+
+3. Fix:
+   ```python
+   socketio.server.emit('test_ping', {'msg': 'from greenlet'}, room=room_name, namespace='/')
+   ```
+   Now it reaches Android.
+
+### Verification
+
+Check backend logs for:
+```
+[SID_LOOKUP] Room 'test_user_android-1-instance-android_test' found: [sid]
+```
+
+If room found but Android not receiving events, the emit pattern is wrong.
+
+---
+
+## Lessons Learned (Android SDK - 2026-01-28)
+
+### DO:
+- ✅ Use native Android SDK (`liva-sdk-android`), not Flutter
+- ✅ Use `socketio.server.emit()` with `namespace='/'` from background greenlets
+- ✅ Use Dyte SocketIO-Kotlin library for Android Socket.IO
+- ✅ Match `instance_id` when sending test messages
+- ✅ Use 10.0.2.2 for localhost from Android emulator
+- ✅ Check room name format: `{user_id}-{agent_id}-instance-{instance_id}`
+
+### DON'T:
+- ❌ Use Flutter for Android testing (missing AndroidManifest.xml issues)
+- ❌ Use `socketio.emit()` from background greenlets (fails for Android)
+- ❌ Assume events that work for web will work for Android
+- ❌ Use official Socket.IO Java client (compatibility issues with Flask-SocketIO 5.x)
 
 ---
 

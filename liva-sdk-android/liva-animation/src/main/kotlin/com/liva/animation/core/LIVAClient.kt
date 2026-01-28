@@ -7,6 +7,7 @@ import android.os.Looper
 import android.graphics.BitmapFactory
 import com.liva.animation.audio.AudioPlayer
 import com.liva.animation.models.DecodedFrame
+import com.liva.animation.models.OverlaySection
 import com.liva.animation.rendering.AnimationEngine
 import com.liva.animation.rendering.AnimationMode
 import com.liva.animation.rendering.BaseFrameManager
@@ -97,6 +98,9 @@ class LIVAClient private constructor() {
     private val pendingBatchCount = mutableMapOf<Int, Int>()
     private val batchLock = Any()
 
+    // Track which chunks have received chunk_images_ready but were deferred
+    private val deferredChunkReady = mutableMapOf<Int, Int>()  // chunkIndex -> totalSent
+
     // MARK: - Base Frame Loading State
 
     private var isBaseFramesLoaded: Boolean = false
@@ -128,6 +132,11 @@ class LIVAClient private constructor() {
         animationEngine = AnimationEngine()
         audioPlayer = AudioPlayer(ctx.cacheDir)
         baseFrameManager = BaseFrameManager(ctx)
+
+        // Connect frame decoder to animation engine for decode-readiness checks
+        frameDecoder?.let { decoder ->
+            animationEngine?.setFrameDecoder(decoder)
+        }
 
         setupAnimationEngineCallbacks()
         setupAudioPlayerCallbacks()
@@ -329,16 +338,25 @@ class LIVAClient private constructor() {
 
     private fun handleAudioReceived(audioChunk: com.liva.animation.models.AudioChunk) {
         // CRITICAL: Clear all state on first chunk (new message response)
+        // Matches iOS/Web forceIdleNow() behavior
         if (audioChunk.chunkIndex == 0) {
             // Stop any currently playing audio (prevents old audio continuing)
             audioPlayer?.stop()
 
-            // Clear overlay cache and animation queue
-            frameDecoder?.clearAllOverlays()
-            animationEngine?.clearQueue()
-            animationEngine?.clearAudioQueue()
+            // Clear pending frame state
+            synchronized(currentChunkFrames) {
+                currentChunkFrames.clear()
+            }
+            pendingOverlayPositions.clear()
+            synchronized(batchLock) {
+                pendingBatchCount.clear()
+                deferredChunkReady.clear()
+            }
 
-            android.util.Log.d(TAG, "Stopped audio and cleared caches for new message")
+            // Force idle and clear all caches (matches iOS forceIdleNow)
+            animationEngine?.forceIdleNow()
+
+            android.util.Log.d(TAG, "🔄 forceIdleNow - stopped audio and cleared all caches for new message")
 
             // Log event
             SessionLogger.getInstance().logEvent("NEW_MESSAGE", mapOf(
@@ -433,7 +451,16 @@ class LIVAClient private constructor() {
 
         if (allBatchesComplete) {
             android.util.Log.d(TAG, "All batches complete for chunk $chunkIndex")
-            // Chunk ready processing can now proceed
+
+            // Check if we deferred chunk_ready for this chunk
+            val totalSent = synchronized(batchLock) {
+                deferredChunkReady.remove(chunkIndex)
+            }
+
+            if (totalSent != null) {
+                android.util.Log.d(TAG, "Processing deferred chunk_ready for chunk $chunkIndex")
+                processChunkReady(chunkIndex, totalSent)
+            }
         }
     }
 
@@ -445,40 +472,56 @@ class LIVAClient private constructor() {
 
         if (hasPendingBatches) {
             android.util.Log.d(TAG, "Deferring chunk_ready for chunk $chunkIndex (batches still processing)")
-            // onBatchComplete will not trigger chunk ready - we'll need to manually check
-            // For now, just wait a bit and retry
-            Handler(Looper.getMainLooper()).postDelayed({
-                handleChunkReady(chunkIndex, totalSent)
-            }, 100)
+            // Store for later processing when batches complete
+            synchronized(batchLock) {
+                deferredChunkReady[chunkIndex] = totalSent
+            }
             return
         }
 
+        processChunkReady(chunkIndex, totalSent)
+    }
+
+    private fun processChunkReady(chunkIndex: Int, totalSent: Int) {
         // Get all frames for this chunk
         val frames: List<DecodedFrame>
         synchronized(currentChunkFrames) {
-            frames = currentChunkFrames[chunkIndex]?.toList() ?: return
+            frames = currentChunkFrames[chunkIndex]?.toList() ?: emptyList()
         }
 
-        if (frames.isEmpty()) return
+        if (frames.isEmpty()) {
+            android.util.Log.w(TAG, "No frames available for chunk $chunkIndex - cannot build OverlaySection")
+            return
+        }
 
-        // Get overlay position
+        // Get overlay position (chunk-level fallback)
         val overlayPosition = pendingOverlayPositions[chunkIndex] ?: PointF(0f, 0f)
+        val zoneTopLeft = Pair(overlayPosition.x.toInt(), overlayPosition.y.toInt())
 
-        // Create animation chunk
-        val animationChunk = QueuedAnimationChunk(
+        // Build OverlaySection (matches iOS processChunkReady)
+        val sortedFrames = frames.sortedBy { it.sequenceIndex }
+        val animationName = sortedFrames.firstOrNull()?.animationName ?: ""
+
+        val overlaySection = OverlaySection(
+            frames = sortedFrames,
             chunkIndex = chunkIndex,
-            frames = frames,
-            overlayPosition = overlayPosition,
-            animationName = frames.firstOrNull()?.animationName ?: "",
-            isReady = true
+            sectionIndex = 0,  // Single section per chunk in current backend
+            animationName = animationName,
+            zoneTopLeft = zoneTopLeft,
+            totalFrames = sortedFrames.size
         )
 
-        // Queue for animation
-        animationEngine?.enqueueChunk(animationChunk)
+        // Enqueue to animation engine (new iOS-style method)
+        animationEngine?.enqueueOverlaySection(overlaySection)
 
-        // Also add frames directly for immediate playback
-        animationEngine?.enqueueFrames(frames, chunkIndex)
-        animationEngine?.setOverlayPosition(overlayPosition)
+        android.util.Log.d(TAG, "✅ Built OverlaySection: chunk=$chunkIndex, frames=${sortedFrames.size}, anim=$animationName")
+
+        // Log event
+        SessionLogger.getInstance().logEvent("CHUNK_READY", mapOf(
+            "chunk" to chunkIndex,
+            "frames" to sortedFrames.size,
+            "animation" to animationName
+        ))
 
         // Clean up stored frames
         synchronized(currentChunkFrames) {
