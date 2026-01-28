@@ -70,6 +70,15 @@ internal class AnimationEngine {
     private var sessionId: String? = null
     private var totalRenderedFrames = 0
 
+    // FPS tracking (iOS-style windowed average)
+    private var fpsLastUpdateTime: Long = 0
+    private var animationFrameCount: Int = 0
+    private var currentFPS: Double = 0.0
+    private val FPS_UPDATE_INTERVAL_MS = 500L  // Update FPS every 0.5 seconds
+
+    // Sync tracking - track actual base frame being rendered
+    private var currentRenderedBaseFrameIndex: Int = 0
+
     // Frame decoder reference for decode-readiness checks
     private var frameDecoder: FrameDecoder? = null
 
@@ -389,11 +398,14 @@ internal class AnimationEngine {
 
         if (baseFrames.isEmpty()) {
             // Fallback to idle
+            currentRenderedBaseFrameIndex = 0
             return manager.getCurrentIdleFrame() ?: baseFrame
         }
 
-        // Use matchedSpriteFrameNumber to sync
+        // Use matchedSpriteFrameNumber to sync - TRACK THIS FOR SYNC STATUS
         val baseFrameIndex = overlay.matchedSpriteFrameNumber % baseFrames.size
+        currentRenderedBaseFrameIndex = baseFrameIndex
+
         return baseFrames.getOrNull(baseFrameIndex) ?: manager.getCurrentIdleFrame() ?: baseFrame
     }
 
@@ -441,25 +453,53 @@ internal class AnimationEngine {
 
     /**
      * Log rendered frame to session logger.
+     * Calculates sync status like iOS: compares backend's matchedSpriteFrameNumber % baseFrameCount
+     * with the actual base frame being rendered.
      */
     private fun logRenderedFrame(section: OverlaySection, frame: DecodedFrame) {
-        if (sessionId == null) return
+        if (sessionId == null) {
+            Log.w(TAG, "Cannot log frame - sessionId is null")
+            return
+        }
 
         totalRenderedFrames++
+        animationFrameCount++
 
+        // FPS tracking (iOS-style windowed average)
         val currentTime = SystemClock.elapsedRealtime()
-        val deltaTime = currentTime - lastFrameTime
-        lastFrameTime = currentTime
-        val fps = if (deltaTime > 0) 1000.0 / deltaTime else 0.0
+        val fpsDelta = currentTime - fpsLastUpdateTime
+        if (fpsDelta >= FPS_UPDATE_INTERVAL_MS) {
+            if (animationFrameCount > 0) {
+                currentFPS = (animationFrameCount * 1000.0) / fpsDelta
+            }
+            animationFrameCount = 0
+            fpsLastUpdateTime = currentTime
+        }
+
+        // Calculate sync status like iOS:
+        // isInSync = (matchedSpriteFrameNumber % baseFrameCount) == actualRenderedBaseFrameIndex
+        val manager = baseFrameManager
+        val animName = frame.animationName.ifEmpty { currentAnimationName }
+        val baseFrameCount = manager?.getAnimationFrames(animName)?.size ?: 1
+        val expectedBaseFrame = frame.matchedSpriteFrameNumber % maxOf(baseFrameCount, 1)
+        val isInSync = expectedBaseFrame == currentRenderedBaseFrameIndex
+
+        val syncStatus = if (isInSync) "SYNC" else "DESYNC"
+
+        // Log debug info for desync
+        if (!isInSync) {
+            Log.w(TAG, "DESYNC detected: expected=$expectedBaseFrame, actual=$currentRenderedBaseFrameIndex, " +
+                    "sprite=${frame.matchedSpriteFrameNumber}, baseCount=$baseFrameCount, anim=$animName")
+        }
 
         SessionLogger.getInstance().logFrame(
             chunk = section.chunkIndex,
             seq = frame.sequenceIndex,
             anim = frame.animationName,
-            baseFrame = frame.matchedSpriteFrameNumber,
+            baseFrame = currentRenderedBaseFrameIndex,
             overlayKey = frame.overlayId ?: "unknown",
-            syncStatus = "SYNC",
-            fps = fps,
+            syncStatus = syncStatus,
+            fps = currentFPS,
             sprite = frame.matchedSpriteFrameNumber,
             char = frame.char,
             buffer = "${section.frames.size - section.currentDrawingFrame}/${section.totalFrames}",
@@ -546,6 +586,13 @@ internal class AnimationEngine {
             mode = newMode
             onModeChange?.invoke(newMode)
             Log.d(TAG, "Mode changed to: $newMode")
+
+            // Reset FPS tracking when switching to TALKING
+            if (newMode == AnimationMode.TALKING) {
+                fpsLastUpdateTime = SystemClock.elapsedRealtime()
+                animationFrameCount = 0
+                currentFPS = 30.0  // Start with target FPS
+            }
         }
     }
 

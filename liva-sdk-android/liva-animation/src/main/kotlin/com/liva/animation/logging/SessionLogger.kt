@@ -236,16 +236,16 @@ class SessionLogger private constructor() {
     ) {
         if (!isEnabled || sessionId == null) return
 
+        // Field names must match backend expectations
         val frameLog = JSONObject().apply {
             put("timestamp", isoDateFormat.format(Date()))
             put("source", platform)
-            put("session", sessionId)
             put("chunk", chunk)
             put("seq", seq)
             put("anim", anim)
-            put("base", baseFrame)
-            put("overlay", overlayKey ?: "")
-            put("sync", syncStatus)
+            put("base_frame", baseFrame)  // Backend expects 'base_frame'
+            put("overlay_key", overlayKey ?: "")  // Backend expects 'overlay_key'
+            put("sync_status", syncStatus)  // Backend expects 'sync_status'
             put("fps", String.format("%.1f", fps))
             put("sprite", sprite ?: "")
             put("char", char ?: "")
@@ -312,6 +312,8 @@ class SessionLogger private constructor() {
     private suspend fun flushFrames() {
         if (frameBatch.isEmpty()) return
 
+        val currentSessionId = sessionId ?: return
+
         val frames = JSONArray()
         var count = 0
 
@@ -333,7 +335,9 @@ class SessionLogger private constructor() {
                 connection.connectTimeout = 2000
                 connection.readTimeout = 2000
 
+                // Backend expects session_id at root level + frames array
                 val requestBody = JSONObject().apply {
+                    put("session_id", currentSessionId)  // Required by backend
                     put("frames", frames)
                 }
 
@@ -343,7 +347,9 @@ class SessionLogger private constructor() {
                 }
 
                 val responseCode = connection.responseCode
-                if (responseCode != 200 && responseCode != 204) {
+                if (responseCode == 200 || responseCode == 204) {
+                    Log.d(TAG, "Frame batch sent: $count frames")
+                } else {
                     Log.w(TAG, "Frame batch response: HTTP $responseCode")
                 }
             } catch (e: Exception) {
