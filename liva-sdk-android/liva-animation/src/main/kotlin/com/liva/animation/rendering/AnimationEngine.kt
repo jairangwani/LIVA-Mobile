@@ -280,13 +280,6 @@ internal class AnimationEngine {
     }
 
     /**
-     * Get current render frame without advancing.
-     */
-    private fun getCurrentRenderFrame(currentTime: Long): RenderFrame? {
-        return lastRenderFrame?.copy(timestamp = currentTime)
-    }
-
-    /**
      * Get frame for idle animation from base frame manager.
      */
     private fun getIdleFrame(timestamp: Long): RenderFrame {
@@ -327,7 +320,7 @@ internal class AnimationEngine {
      * Get current render frame without advancing (between frame intervals).
      * BUG FIX: Now properly uses baseFrameManager instead of just baseFrame.
      */
-    private fun getCurrentRenderFrame(timestamp: Long): RenderFrame {
+    private fun getCurrentRenderFrame(timestamp: Long): RenderFrame? {
         // Get base frame from manager (like getIdleFrame does) - FIXED BUG!
         val manager = baseFrameManager
         val currentBaseFrame = manager?.getCurrentIdleFrame() ?: baseFrame

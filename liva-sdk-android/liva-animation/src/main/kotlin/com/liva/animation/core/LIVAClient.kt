@@ -293,7 +293,7 @@ class LIVAClient private constructor() {
     private fun handleAudioReceived(audioChunk: com.liva.animation.models.AudioChunk) {
         // CRITICAL: Clear overlay cache on first chunk (new message response)
         if (audioChunk.chunkIndex == 0) {
-            frameDecoder.clearAllOverlays()
+            frameDecoder?.clearAllOverlays()
             animationEngine?.clearQueue()
             android.util.Log.d(TAG, "Cleared overlay cache for new message")
 

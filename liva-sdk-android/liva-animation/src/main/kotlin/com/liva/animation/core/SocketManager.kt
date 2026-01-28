@@ -233,7 +233,14 @@ internal class LIVASocketManager(
             val audioChunk = AudioChunk(
                 audioData = audioData,
                 chunkIndex = chunkIndex,
-                animationMetadata = animationFramesChunk.firstOrNull()
+                animationMetadata = animationFramesChunk.firstOrNull()?.let {
+                    AnimationMetadata(
+                        animationName = it.animationName,
+                        zoneTopLeft = it.zoneTopLeft,
+                        masterFramePlayAt = it.masterFramePlayAt,
+                        mode = it.mode
+                    )
+                }
             )
 
             scope.launch(Dispatchers.Main) {

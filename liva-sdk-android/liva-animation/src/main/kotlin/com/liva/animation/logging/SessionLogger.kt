@@ -175,43 +175,45 @@ class SessionLogger private constructor() {
     fun endSession() {
         val currentSessionId = sessionId ?: return
 
-        try {
-            // Flush remaining batches
-            flushBatches()
+        scope.launch {
+            try {
+                // Flush remaining batches
+                flushBatches()
 
-            // Stop batch processing
-            batchJob?.cancel()
-            batchJob = null
+                // Stop batch processing
+                batchJob?.cancel()
+                batchJob = null
 
-            // Call backend to end session
-            val url = URL("$serverUrl/api/log/session/end")
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.doOutput = true
+                // Call backend to end session
+                val url = URL("$serverUrl/api/log/session/end")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.doOutput = true
 
-            val requestBody = JSONObject().apply {
-                put("session_id", currentSessionId)
+                val requestBody = JSONObject().apply {
+                    put("session_id", currentSessionId)
+                }
+
+                OutputStreamWriter(connection.outputStream).use { writer ->
+                    writer.write(requestBody.toString())
+                    writer.flush()
+                }
+
+                val responseCode = connection.responseCode
+                if (responseCode == 200) {
+                    Log.d(TAG, "Ended session: $currentSessionId")
+                } else {
+                    Log.w(TAG, "Failed to end session: HTTP $responseCode")
+                }
+
+                sessionId = null
+                userId = null
+                agentId = null
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error ending session", e)
             }
-
-            OutputStreamWriter(connection.outputStream).use { writer ->
-                writer.write(requestBody.toString())
-                writer.flush()
-            }
-
-            val responseCode = connection.responseCode
-            if (responseCode == 200) {
-                Log.d(TAG, "Ended session: $currentSessionId")
-            } else {
-                Log.w(TAG, "Failed to end session: HTTP $responseCode")
-            }
-
-            sessionId = null
-            userId = null
-            agentId = null
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error ending session", e)
         }
     }
 

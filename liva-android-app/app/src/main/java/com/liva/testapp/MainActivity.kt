@@ -8,6 +8,7 @@ import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
 import com.liva.animation.core.LIVAClient
 import com.liva.animation.core.LIVAConfiguration
+import com.liva.animation.rendering.LIVACanvasView
 import com.liva.animation.core.LIVAState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -72,15 +73,12 @@ class MainActivity : AppCompatActivity() {
 
             livaClient?.configure(config)
 
-            // Attach canvas view
-            val canvasView = livaClient?.getCanvasView()
-            if (canvasView != null) {
-                canvasContainer.removeAllViews()
-                canvasContainer.addView(canvasView)
-                Log.d(TAG, "Canvas view attached")
-            } else {
-                Log.e(TAG, "Canvas view is null!")
-            }
+            // Create and attach canvas view
+            val canvasView = LIVACanvasView(this)
+            canvasContainer.removeAllViews()
+            canvasContainer.addView(canvasView)
+            livaClient?.attachView(canvasView)
+            Log.d(TAG, "Canvas view attached")
 
             // Connect to backend
             livaClient?.connect()

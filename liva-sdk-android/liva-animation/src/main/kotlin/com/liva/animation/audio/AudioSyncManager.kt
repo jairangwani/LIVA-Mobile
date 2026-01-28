@@ -1,6 +1,7 @@
 package com.liva.animation.audio
 
 import com.liva.animation.rendering.AnimationEngine
+import com.liva.animation.rendering.AnimationMode
 import kotlinx.coroutines.*
 
 /**
@@ -17,7 +18,7 @@ internal class AudioSyncManager(
 
     fun startSync() {
         currentFrame = 0
-        animationEngine.setMode(AnimationEngine.AnimationMode.TALKING)
+        animationEngine.setMode(AnimationMode.TALKING)
     }
 
     fun onChunkComplete(chunkIndex: Int) {
@@ -26,14 +27,14 @@ internal class AudioSyncManager(
     }
 
     fun stopSync() {
-        animationEngine.setMode(AnimationEngine.AnimationMode.IDLE)
+        animationEngine.setMode(AnimationMode.IDLE)
         currentFrame = 0
     }
 
     fun onAudioEnd() {
         scope.launch {
             delay(500)
-            animationEngine.setMode(AnimationEngine.AnimationMode.IDLE)
+            animationEngine.setMode(AnimationMode.IDLE)
         }
     }
 

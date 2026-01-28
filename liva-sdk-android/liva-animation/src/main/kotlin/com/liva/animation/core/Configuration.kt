@@ -37,5 +37,5 @@ sealed class LIVAError : Exception() {
     object SocketDisconnected : LIVAError()
     object FrameDecodingFailed : LIVAError()
     object AudioPlaybackFailed : LIVAError()
-    data class Unknown(val message: String) : LIVAError()
+    data class Unknown(override val message: String) : LIVAError()
 }
