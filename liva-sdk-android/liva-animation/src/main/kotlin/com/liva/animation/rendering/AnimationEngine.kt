@@ -124,6 +124,17 @@ internal class AnimationEngine {
         }
     }
 
+    /**
+     * Clear all queued audio (called when new message starts)
+     */
+    fun clearAudioQueue() {
+        audioChunkLock.withLock {
+            pendingAudioChunks.clear()
+            audioStartedForChunk.clear()
+            Log.d(TAG, "Cleared audio queue and started-chunk tracking")
+        }
+    }
+
     // MARK: - Frame Queue Management
 
     /**

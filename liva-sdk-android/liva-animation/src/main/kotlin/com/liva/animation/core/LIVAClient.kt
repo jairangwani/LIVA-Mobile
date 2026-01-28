@@ -291,11 +291,17 @@ class LIVAClient private constructor() {
     // MARK: - Event Handlers
 
     private fun handleAudioReceived(audioChunk: com.liva.animation.models.AudioChunk) {
-        // CRITICAL: Clear overlay cache on first chunk (new message response)
+        // CRITICAL: Clear all state on first chunk (new message response)
         if (audioChunk.chunkIndex == 0) {
+            // Stop any currently playing audio (prevents old audio continuing)
+            audioPlayer?.stop()
+
+            // Clear overlay cache and animation queue
             frameDecoder?.clearAllOverlays()
             animationEngine?.clearQueue()
-            android.util.Log.d(TAG, "Cleared overlay cache for new message")
+            animationEngine?.clearAudioQueue()
+
+            android.util.Log.d(TAG, "Stopped audio and cleared caches for new message")
 
             // Log event
             SessionLogger.getInstance().logEvent("NEW_MESSAGE", mapOf(
