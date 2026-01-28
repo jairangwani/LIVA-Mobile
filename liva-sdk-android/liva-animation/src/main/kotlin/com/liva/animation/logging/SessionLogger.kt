@@ -64,7 +64,34 @@ class SessionLogger private constructor() {
      */
     fun configure(url: String) {
         serverUrl = url.trimEnd('/')
-        Log.d(TAG, "Configured with server URL: $serverUrl")
+        Log.e(TAG, "========== SESSIONLOGGER CONFIGURE CALLED ==========")
+        Log.e(TAG, "Server URL: $serverUrl")
+
+        // TEST: Verify HTTP connectivity immediately
+        scope.launch {
+            try {
+                val testUrl = URL("$serverUrl/health")
+                Log.e(TAG, "Testing HTTP to: $testUrl")
+                val connection = testUrl.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 3000
+                connection.readTimeout = 3000
+
+                val responseCode = connection.responseCode
+                Log.e(TAG, "HTTP response code: $responseCode")
+                connection.disconnect()
+
+                if (responseCode == 200) {
+                    Log.e(TAG, "SUCCESS: HTTP works!")
+                } else {
+                    Log.e(TAG, "FAILED: HTTP code $responseCode")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "EXCEPTION: ${e.javaClass.simpleName}")
+                Log.e(TAG, "Message: ${e.message}")
+                e.printStackTrace()
+            }
+        }
     }
 
     /**
