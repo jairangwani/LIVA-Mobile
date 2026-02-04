@@ -440,6 +440,11 @@ The iOS SDK implements batched async frame processing to prevent main thread blo
 - When overlay not decoded, animation holds previous frame
 - Frame counter doesn't advance on skip
 - Prevents visual desync during async decoding
+- **SKIP_DRAW timeout:** After 15 consecutive skips (~500ms), force-advances past stuck frame to prevent infinite freeze. Counter resets on successful render or mode change.
+
+**Chunk Eviction (cross-chunk safety):**
+- `evictChunks()` removes cached images from completed chunks to free memory
+- **Shared-key protection:** Before evicting a key, checks if any remaining active chunk also uses it. Prevents cross-chunk content key collisions from destroying images still needed by later chunks. (See `docs/lessons/MOBILE.md` for full bug description.)
 
 **Chunk Synchronization:**
 - `pendingBatchCount` tracks async batch operations per chunk
@@ -454,9 +459,9 @@ The iOS SDK implements batched async frame processing to prevent main thread blo
 
 ### Key Files
 
-- `LIVAImageCache.swift` - Decode tracking (`decodedKeys`, `isImageDecoded()`)
-- `LIVAAnimationEngine.swift` - Skip-draw, buffer readiness (`shouldSkipFrameAdvance`)
-- `LIVAClient.swift` - Batched processing, chunk synchronization (`pendingBatchCount`, `deferredChunkReady`)
+- `LIVAImageCache.swift` - Decode tracking (`decodedKeys`, `isImageDecoded()`), cross-chunk eviction with shared-key protection
+- `LIVAAnimationEngine.swift` - Skip-draw with timeout (`shouldSkipFrameAdvance`, `maxConsecutiveSkipDraws`), buffer readiness
+- `LIVAClient.swift` - Batched processing, chunk synchronization (`pendingBatchCount`, `deferredChunkReady`), frame loss detection
 
 ### Debugging
 
