@@ -48,6 +48,11 @@ class LIVACanvasView @JvmOverloads constructor(
     private var featheredOverlayCanvas: Canvas? = null
     private val xfermodeClear = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
 
+    // Idle frame rate throttling (R57 fix)
+    // Web uses 15fps during idle to save battery. Full rate during talking.
+    private var lastIdleDrawTime = 0L
+    private val IDLE_FRAME_INTERVAL_MS = (1000.0 / 15.0).toLong()  // ~66ms = 15fps
+
     // Debug
     var showDebugInfo = false
     private var frameCount = 0
@@ -136,9 +141,20 @@ class LIVACanvasView @JvmOverloads constructor(
     }
 
     private fun renderFrame() {
+        val currentTime = System.currentTimeMillis()
+
+        // R57 FIX: Throttle frame rate during idle to save battery
+        // Full rate during talking/transition for smooth lip sync
+        val engine = animationEngine
+        if (engine != null && engine.mode == AnimationMode.IDLE) {
+            if (currentTime - lastIdleDrawTime < IDLE_FRAME_INTERVAL_MS) {
+                return  // Skip this frame, Choreographer will call again next vsync
+            }
+            lastIdleDrawTime = currentTime
+        }
+
         // Update FPS counter
         frameCount++
-        val currentTime = System.currentTimeMillis()
         if (currentTime - lastFpsTime >= 1000) {
             currentFps = frameCount * 1000.0 / (currentTime - lastFpsTime)
             frameCount = 0
@@ -146,7 +162,7 @@ class LIVACanvasView @JvmOverloads constructor(
         }
 
         // Get next frame from animation engine
-        animationEngine?.getNextFrame()?.let { frame ->
+        engine?.getNextFrame()?.let { frame ->
             baseFrame = frame.baseImage
             overlayFrame = frame.overlayImage
             overlayPosition = frame.overlayPosition

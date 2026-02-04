@@ -261,6 +261,15 @@ class BaseFrameManager(private val context: Context) {
     }
 
     /**
+     * Get list of all fully loaded animation names.
+     * Used to populate readyAnimations in POST /messages.
+     */
+    @Synchronized
+    fun getLoadedAnimationNames(): List<String> {
+        return loadedAnimations.toList()
+    }
+
+    /**
      * Check if idle animation is ready.
      */
     val isIdleReady: Boolean

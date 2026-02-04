@@ -173,6 +173,39 @@ class LIVAClient private constructor() {
     }
 
     /**
+     * Get list of loaded animation names.
+     * Include in POST /messages as readyAnimations so backend selects correct animations.
+     */
+    fun getLoadedAnimations(): List<String> {
+        return baseFrameManager?.getLoadedAnimationNames() ?: emptyList()
+    }
+
+    /**
+     * Prepare for a new message by forcing idle and clearing all caches.
+     * MUST be called BEFORE sending POST to /messages (matches Web/iOS behavior).
+     * Without this, old animation state can interfere with new response.
+     */
+    fun prepareForNewMessage() {
+        // Stop any currently playing audio
+        audioPlayer?.stop()
+
+        // Clear pending frame state
+        synchronized(currentChunkFrames) {
+            currentChunkFrames.clear()
+        }
+        pendingOverlayPositions.clear()
+        synchronized(batchLock) {
+            pendingBatchCount.clear()
+            deferredChunkReady.clear()
+        }
+
+        // Force idle and clear all caches
+        animationEngine?.forceIdleNow()
+
+        android.util.Log.d(TAG, "🔄 prepareForNewMessage - forced idle before POST")
+    }
+
+    /**
      * Disconnect from the server.
      */
     fun disconnect() {
@@ -337,26 +370,21 @@ class LIVAClient private constructor() {
     // MARK: - Event Handlers
 
     private fun handleAudioReceived(audioChunk: com.liva.animation.models.AudioChunk) {
-        // CRITICAL: Clear all state on first chunk (new message response)
-        // Matches iOS/Web forceIdleNow() behavior
+        // NOTE: forceIdleNow() is now called BEFORE POST via prepareForNewMessage()
+        // (matches Web/iOS timing). We keep a lightweight safety check here for chunk 0
+        // in case prepareForNewMessage() wasn't called (e.g., curl-based testing).
         if (audioChunk.chunkIndex == 0) {
-            // Stop any currently playing audio (prevents old audio continuing)
-            audioPlayer?.stop()
-
-            // Clear pending frame state
-            synchronized(currentChunkFrames) {
-                currentChunkFrames.clear()
+            if (animationEngine?.mode != AnimationMode.IDLE) {
+                android.util.Log.w(TAG, "⚠️ Chunk 0 arrived but not in IDLE - prepareForNewMessage() may not have been called. Forcing idle now.")
+                audioPlayer?.stop()
+                synchronized(currentChunkFrames) { currentChunkFrames.clear() }
+                pendingOverlayPositions.clear()
+                synchronized(batchLock) {
+                    pendingBatchCount.clear()
+                    deferredChunkReady.clear()
+                }
+                animationEngine?.forceIdleNow()
             }
-            pendingOverlayPositions.clear()
-            synchronized(batchLock) {
-                pendingBatchCount.clear()
-                deferredChunkReady.clear()
-            }
-
-            // Force idle and clear all caches (matches iOS forceIdleNow)
-            animationEngine?.forceIdleNow()
-
-            android.util.Log.d(TAG, "🔄 forceIdleNow - stopped audio and cleared all caches for new message")
 
             // Log event
             SessionLogger.getInstance().logEvent("NEW_MESSAGE", mapOf(

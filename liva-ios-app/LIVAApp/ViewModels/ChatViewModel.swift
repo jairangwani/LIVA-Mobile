@@ -92,7 +92,8 @@ final class ChatViewModel: ObservableObject {
             "AgentID": config.agentId,
             "message": trimmed,
             "instance_id": config.instanceId,
-            "userResolution": config.resolution
+            "userResolution": config.resolution,
+            "readyAnimations": LIVAClient.shared.getLoadedAnimations()
         ]
 
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)

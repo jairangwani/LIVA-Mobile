@@ -14,6 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -93,6 +94,15 @@ class MainActivity : AppCompatActivity() {
     private fun sendMessage(message: String) {
         Log.d(TAG, "Sending message: $message")
 
+        // CRITICAL: Force idle BEFORE POST (matches Web/iOS behavior)
+        // This clears old animation state so new response starts clean
+        livaClient?.prepareForNewMessage()
+
+        // Get loaded animations for readyAnimations field
+        // Without this, backend defaults to empty list and only selects idle animations
+        val loadedAnimations = livaClient?.getLoadedAnimations() ?: emptyList()
+        Log.d(TAG, "readyAnimations: $loadedAnimations (${loadedAnimations.size} loaded)")
+
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val url = URL("$SERVER_URL/messages")
@@ -109,6 +119,7 @@ class MainActivity : AppCompatActivity() {
                     put("message", message)
                     put("instance_id", "android_test")
                     put("userResolution", "512")
+                    put("readyAnimations", JSONArray(loadedAnimations))
                 }
 
                 connection.outputStream.use { os ->
