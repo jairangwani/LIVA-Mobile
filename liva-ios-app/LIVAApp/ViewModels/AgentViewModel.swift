@@ -68,6 +68,10 @@ final class AgentViewModel: ObservableObject {
         selectedAgent = agent
         AppConfig.shared.agentId = agent.id
     }
+
+    func deselectAgent() {
+        selectedAgent = nil
+    }
 }
 
 private struct AgentListResponse: Decodable {

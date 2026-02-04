@@ -5,14 +5,20 @@ struct ContentView: View {
     @StateObject private var agentVM = AgentViewModel()
 
     var body: some View {
-        ChatView(authVM: authVM, agentVM: agentVM)
-            .onAppear {
-                if !authVM.isLoggedIn {
-                    authVM.loginAsGuest()
-                }
-                if agentVM.selectedAgent == nil {
-                    agentVM.selectAgent(Agent(id: "1", name: "Anna"))
-                }
+        Group {
+            if agentVM.selectedAgent != nil {
+                ChatView(authVM: authVM, agentVM: agentVM)
+            } else {
+                AgentSelectionView(agentVM: agentVM, authVM: authVM)
             }
+        }
+        .onAppear {
+            if !authVM.isLoggedIn {
+                authVM.loginAsGuest()
+            }
+            if agentVM.selectedAgent == nil {
+                agentVM.selectAgent(Agent(id: "1", name: "Anna"))
+            }
+        }
     }
 }
