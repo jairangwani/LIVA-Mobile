@@ -121,6 +121,9 @@ public final class LIVAClient {
     /// This is a streaming app, not batch processing - decode as we play
     private let maxConcurrentDecodes: Int = 1
 
+    /// Track total frames received per chunk (for debugging frame loss)
+    private var framesReceivedPerChunk: [Int: Int] = [:]
+
     /// Pending base animation to play after all chunks finish (like web's pendingBaseAtEndRef)
     /// Set when backend sends play_base_animation event, used when transitioning to idle
     private var pendingBaseAtEnd: String?
@@ -547,7 +550,12 @@ public final class LIVAClient {
         // PHASE 1 & 5: Increment pending batch count IMMEDIATELY (before async)
         batchTrackingLock.withLock {
             pendingBatchCount[chunkIndex, default: 0] += 1
+            framesReceivedPerChunk[chunkIndex, default: 0] += frameCount
         }
+
+        // Log cumulative frame count for this chunk
+        let totalReceived = batchTrackingLock.withLock { framesReceivedPerChunk[chunkIndex, default: 0] }
+        clientLog("[LIVAClient] 📊 FRAME_ARRIVAL chunk=\(chunkIndex) batch=\(batchIndex) batchFrames=\(frameCount) totalReceived=\(totalReceived)")
 
         // Initialize tracking arrays for this chunk if needed (thread-safe)
         batchTrackingLock.withLock {
@@ -713,6 +721,21 @@ public final class LIVAClient {
     }
 
     private func handleChunkReady(chunkIndex: Int, totalSent: Int) {
+        // FRAME LOSS DETECTION: Compare received vs sent
+        let received = batchTrackingLock.withLock { framesReceivedPerChunk[chunkIndex, default: 0] }
+        let lost = totalSent - received
+        if lost > 0 {
+            clientLog("[LIVAClient] ⚠️ FRAME_LOSS chunk=\(chunkIndex) sent=\(totalSent) received=\(received) lost=\(lost)")
+            LIVASessionLogger.shared.logEvent("FRAME_LOSS", details: [
+                "chunk": chunkIndex,
+                "sent": totalSent,
+                "received": received,
+                "lost": lost
+            ])
+        } else {
+            clientLog("[LIVAClient] ✅ FRAME_DELIVERY chunk=\(chunkIndex) sent=\(totalSent) received=\(received) (all frames delivered)")
+        }
+
         // PHASE 5: Check if batches are still processing + frames exist (single lock)
         let shouldDefer = batchTrackingLock.withLock { () -> (shouldDefer: Bool, reason: String?) in
             let pendingCount = pendingBatchCount[chunkIndex, default: 0]

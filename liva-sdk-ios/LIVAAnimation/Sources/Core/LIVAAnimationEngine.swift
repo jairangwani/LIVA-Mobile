@@ -120,6 +120,12 @@ class LIVAAnimationEngine {
     /// Is a set currently playing?
     private var isSetPlaying: Bool = false
 
+    /// SKIP_DRAW timeout: skip frame after this many consecutive failures
+    /// At 30fps, 15 consecutive skips ≈ 500ms of waiting
+    private let maxConsecutiveSkipDraws: Int = 15
+    private var consecutiveSkipDrawCount: Int = 0
+    private var lastSkipDrawSeq: Int = -1
+
     /// Image cache for overlay frames
     private let imageCache = LIVAImageCache()
 
@@ -512,6 +518,9 @@ class LIVAAnimationEngine {
         // Reset FPS calculation
         animationFrameCount = 0
         currentFPS = 0.0
+        // Reset SKIP_DRAW timeout
+        consecutiveSkipDrawCount = 0
+        lastSkipDrawSeq = -1
 
         animLog("[LIVAAnimationEngine] 🔄 Reset to idle")
     }
@@ -536,6 +545,10 @@ class LIVAAnimationEngine {
         // Reset time accumulators
         idleFrameAccumulator = 0.0
         overlayFrameAccumulator = 0.0
+
+        // Reset SKIP_DRAW timeout
+        consecutiveSkipDrawCount = 0
+        lastSkipDrawSeq = -1
 
         // CRITICAL: Clear overlay image cache to prevent stale overlays from previous response
         // Without this, chunk indices reset to 0 but old images at key "0-0-0" etc. would be reused
@@ -785,9 +798,36 @@ class LIVAAnimationEngine {
                 let isOverlayDecoded = imageCache.isImageDecoded(forKey: key)
 
                 if !isOverlayDecoded {
-                    // SKIP THIS FRAME - hold previous frame
-                    shouldSkipFrameAdvance = true
-                    hasOverlayImage = false
+                    // Track consecutive SKIP_DRAWs for same sequence
+                    if state.currentDrawingFrame == lastSkipDrawSeq {
+                        consecutiveSkipDrawCount += 1
+                    } else {
+                        consecutiveSkipDrawCount = 1
+                        lastSkipDrawSeq = state.currentDrawingFrame
+                    }
+
+                    // SKIP_DRAW TIMEOUT: After maxConsecutiveSkipDraws (~3s at 30fps),
+                    // force-advance past stuck frame to prevent infinite freeze
+                    if consecutiveSkipDrawCount >= maxConsecutiveSkipDraws {
+                        // Force advance - skip this frame entirely
+                        shouldSkipFrameAdvance = false
+                        hasOverlayImage = false
+                        consecutiveSkipDrawCount = 0
+                        lastSkipDrawSeq = -1
+
+                        animLog("[LIVAAnimationEngine] ⚠️ SKIP_DRAW TIMEOUT: Force-advancing past stuck frame chunk=\(section.chunkIndex) seq=\(state.currentDrawingFrame) key=\(key) after \(maxConsecutiveSkipDraws) consecutive skips")
+
+                        LIVASessionLogger.shared.logEvent("SKIP_DRAW_TIMEOUT", details: [
+                            "chunk": section.chunkIndex,
+                            "seq": state.currentDrawingFrame,
+                            "key": key,
+                            "skips": maxConsecutiveSkipDraws
+                        ])
+                    } else {
+                        // Normal skip - hold previous frame
+                        shouldSkipFrameAdvance = true
+                        hasOverlayImage = false
+                    }
 
                     // DIAGNOSTICS: Record frame skipped
                     LIVAPerformanceTracker.shared.recordFrameSkipped(reason: "Overlay not decoded")
@@ -795,18 +835,23 @@ class LIVAAnimationEngine {
                     // IMPORTANT: Log every skip to track freeze issues
                     // This helps identify which specific frames are causing pauses
                     let isCached = imageCache.hasImage(forKey: key)
-                    animLog("[LIVAAnimationEngine] ⏸️ SKIP-DRAW: chunk=\(section.chunkIndex) seq=\(state.currentDrawingFrame) key=\(key) isCached=\(isCached) isDecoded=\(isOverlayDecoded)")
+                    animLog("[LIVAAnimationEngine] ⏸️ SKIP-DRAW: chunk=\(section.chunkIndex) seq=\(state.currentDrawingFrame) key=\(key) isCached=\(isCached) isDecoded=\(isOverlayDecoded) consecutive=\(consecutiveSkipDrawCount)/\(maxConsecutiveSkipDraws)")
 
                     // Log to session for user visibility
                     LIVASessionLogger.shared.logEvent("SKIP_DRAW", details: [
                         "chunk": section.chunkIndex,
                         "seq": state.currentDrawingFrame,
                         "is_cached": isCached,
-                        "is_decoded": isOverlayDecoded
+                        "is_decoded": isOverlayDecoded,
+                        "consecutive": consecutiveSkipDrawCount
                     ])
                 } else if let overlayImage = imageCache.getImage(forKey: key) {
                     overlaysToRender.append((overlayImage, overlayFrame.coordinates))
                     hasOverlayImage = true
+
+                    // Reset SKIP_DRAW timeout on successful render
+                    consecutiveSkipDrawCount = 0
+                    lastSkipDrawSeq = -1
 
                     // DIAGNOSTICS: Record frame rendered
                     LIVAPerformanceTracker.shared.recordFrameRendered(chunk: section.chunkIndex, seq: state.currentDrawingFrame)
@@ -816,10 +861,32 @@ class LIVAAnimationEngine {
                         animLog("[LIVAAnimationEngine] 🖼️ Got overlay: key=\(key), size=\(overlayImage.size), coords=\(overlayFrame.coordinates)")
                     }
                 } else {
-                    // Missing overlay frame - log warning every frame when missing
-                    hasOverlayImage = false
-                    shouldSkipFrameAdvance = true  // Also skip if image missing
-                    animLog("[LIVAAnimationEngine] ⚠️ MISSING overlay: key=\(key), drawFrame=\(state.currentDrawingFrame), seqIndex=\(overlayFrame.sequenceIndex), cacheCount=\(imageCache.count)")
+                    // Missing overlay frame (decoded flag set but NSCache evicted)
+                    // Apply same SKIP_DRAW timeout logic
+                    if state.currentDrawingFrame == lastSkipDrawSeq {
+                        consecutiveSkipDrawCount += 1
+                    } else {
+                        consecutiveSkipDrawCount = 1
+                        lastSkipDrawSeq = state.currentDrawingFrame
+                    }
+
+                    if consecutiveSkipDrawCount >= maxConsecutiveSkipDraws {
+                        shouldSkipFrameAdvance = false
+                        hasOverlayImage = false
+                        consecutiveSkipDrawCount = 0
+                        lastSkipDrawSeq = -1
+                        animLog("[LIVAAnimationEngine] ⚠️ MISSING TIMEOUT: Force-advancing past evicted frame chunk=\(section.chunkIndex) seq=\(state.currentDrawingFrame) key=\(key)")
+                        LIVASessionLogger.shared.logEvent("SKIP_DRAW_TIMEOUT", details: [
+                            "chunk": section.chunkIndex,
+                            "seq": state.currentDrawingFrame,
+                            "key": key,
+                            "reason": "evicted"
+                        ])
+                    } else {
+                        hasOverlayImage = false
+                        shouldSkipFrameAdvance = true
+                    }
+                    animLog("[LIVAAnimationEngine] ⚠️ MISSING overlay: key=\(key), drawFrame=\(state.currentDrawingFrame), seqIndex=\(overlayFrame.sequenceIndex), cacheCount=\(imageCache.count) consecutive=\(consecutiveSkipDrawCount)/\(maxConsecutiveSkipDraws)")
                 }
             }
         }

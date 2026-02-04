@@ -98,6 +98,7 @@ class LIVAImageCache {
 
             // Base64 decode on background thread (previously blocking main thread)
             guard let data = Data(base64Encoded: base64Data) else {
+                print("[LIVAImageCache] ❌ DECODE_FAIL: base64 decode failed for key=\(key) chunk=\(chunkIndex) len=\(base64Data.count)")
                 self.decrementPendingAndNotify(chunkIndex: chunkIndex)
                 completion?(false)
                 return
@@ -108,6 +109,7 @@ class LIVAImageCache {
 
             // UIImage creation on background thread (previously blocking main thread)
             guard let rawImage = UIImage(data: data) else {
+                print("[LIVAImageCache] ❌ DECODE_FAIL: UIImage creation failed for key=\(key) chunk=\(chunkIndex) dataSize=\(data.count)")
                 self.decrementPendingAndNotify(chunkIndex: chunkIndex)
                 completion?(false)
                 return
@@ -219,6 +221,7 @@ class LIVAImageCache {
 
             // UIImage creation on background thread (no base64 decode needed!)
             guard let rawImage = UIImage(data: imageData) else {
+                print("[LIVAImageCache] ❌ DECODE_FAIL: UIImage creation failed (raw) for key=\(key) chunk=\(chunkIndex) dataSize=\(imageData.count)")
                 self.decrementPendingAndNotify(chunkIndex: chunkIndex)
                 completion?(false)
                 return
@@ -382,24 +385,44 @@ class LIVAImageCache {
 
     /// Evict all images from specified chunks
     /// - Parameter chunkIndices: Set of chunk indices to evict
+    ///
+    /// IMPORTANT: Only removes keys that aren't shared with other active chunks.
+    /// Cross-chunk content key collisions (same overlay sprite in multiple chunks)
+    /// would cause premature eviction of images still needed by later chunks.
     func evictChunks(_ chunkIndices: Set<Int>) {
         lock.withLock {
             var totalEvicted = 0
+            var totalRetained = 0
+
+            // Collect all keys used by chunks NOT being evicted
+            var retainedKeys = Set<String>()
+            for (chunkIndex, keys) in chunkImageKeys where !chunkIndices.contains(chunkIndex) {
+                retainedKeys.formUnion(keys)
+            }
 
             for chunkIndex in chunkIndices {
                 guard let imageKeys = chunkImageKeys[chunkIndex] else { continue }
 
                 for key in imageKeys {
-                    cache.removeObject(forKey: key as NSString)
-                    decodedKeys.remove(key)  // Also remove from decoded tracking
-                    totalEvicted += 1
+                    if retainedKeys.contains(key) {
+                        // Key shared with another active chunk — keep it
+                        totalRetained += 1
+                    } else {
+                        cache.removeObject(forKey: key as NSString)
+                        decodedKeys.remove(key)
+                        totalEvicted += 1
+                    }
                 }
 
                 chunkImageKeys.removeValue(forKey: chunkIndex)
             }
 
             #if DEBUG
-            print("[LIVAImageCache] Evicted \(totalEvicted) images from \(chunkIndices.count) chunks")
+            if totalRetained > 0 {
+                print("[LIVAImageCache] Evicted \(totalEvicted) images from \(chunkIndices.count) chunks, retained \(totalRetained) shared keys")
+            } else {
+                print("[LIVAImageCache] Evicted \(totalEvicted) images from \(chunkIndices.count) chunks")
+            }
             #endif
         }
     }

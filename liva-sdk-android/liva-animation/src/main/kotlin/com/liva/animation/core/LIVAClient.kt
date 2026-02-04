@@ -234,6 +234,9 @@ class LIVAClient private constructor() {
      * Priority 2: Remaining animations (background loading)
      */
     private fun requestBaseAnimations() {
+        // Reset background loading flag so it re-triggers on this connection
+        isBackgroundLoadingStarted = false
+
         // STARTUP OPTIMIZATION: Request idle first for fast startup
         android.util.Log.d(TAG, "🚀 STARTUP: Requesting idle animation first for fast UI unlock")
         socketManager?.requestBaseAnimation("idle_1_s_idle_1_e")
@@ -599,17 +602,20 @@ class LIVAClient private constructor() {
     private fun handleAnimationFramesComplete(animationName: String) {
         android.util.Log.d("LIVAClient", "Animation complete: $animationName")
 
-        // STARTUP OPTIMIZATION: When idle completes, start background loading
-        if (animationName == "idle_1_s_idle_1_e" && !isBaseFramesLoaded) {
-            isBaseFramesLoaded = true
-            notifyIdleReady()
+        // STARTUP OPTIMIZATION: When idle completes, start background loading.
+        // Note: isBackgroundLoadingStarted prevents duplicate triggers even if idle
+        // was already cached (isBaseFramesLoaded=true from loadBaseFramesFromCache).
+        if (animationName == "idle_1_s_idle_1_e") {
+            if (!isBaseFramesLoaded) {
+                isBaseFramesLoaded = true
+                notifyIdleReady()
+            }
 
-            // UI is now ready! Load remaining animations in background
-            android.util.Log.d(TAG, "🚀 STARTUP: Idle animation complete - UI ready! Starting background loading...")
+            // Always trigger background loading when idle finishes from server
+            // (isBackgroundLoadingStarted flag prevents duplicate requests)
+            android.util.Log.d(TAG, "🚀 STARTUP: Idle animation complete - starting background loading...")
             loadRemainingAnimationsInBackground()
         }
-
-        // For all other animations, just log completion (background loading handles them)
     }
 
     // MARK: - Base Frame Manager Callbacks
