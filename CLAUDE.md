@@ -60,7 +60,7 @@ LIVA-Mobile/
 │               └── Models.kt                  # Data classes
 ├── liva-ios-app/                               # Native SwiftUI iOS app
 │   └── LIVAApp/                               # App source (SwiftUI, uses liva-sdk-ios via SPM)
-│       ├── Views/                             # ChatView, LoginView, AgentSelectionView, SettingsView
+│       ├── Views/                             # ChatView (header + canvas + conversation panel), AgentSelectionView, LoginView, SettingsView
 │       ├── ViewModels/                        # ChatViewModel, AuthViewModel, AgentViewModel
 │       ├── Models/                            # Message
 │       └── Config/                            # AppConfig
