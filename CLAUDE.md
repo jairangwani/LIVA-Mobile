@@ -648,4 +648,8 @@ See also: [../docs/lessons/MOBILE.md](../docs/lessons/MOBILE.md) for full lesson
 
 ## Architecture Reference
 
-See main docs: [../CLAUDE.md](../CLAUDE.md)
+- **Client Animation Pipeline (master workflow):** [../docs/architecture/CLIENT_ANIMATION_PIPELINE.md](../docs/architecture/CLIENT_ANIMATION_PIPELINE.md) — 8-phase rendering pipeline, per-platform implementation maps, known bugs, debugging guide. **Read this first when debugging animation issues.**
+- **iOS SDK integration:** [../docs/architecture/IOS_SDK_INTEGRATION.md](../docs/architecture/IOS_SDK_INTEGRATION.md)
+- **iOS async processing:** [../docs/architecture/IOS_ASYNC_PROCESSING.md](../docs/architecture/IOS_ASYNC_PROCESSING.md)
+- **Android SDK integration:** [../docs/architecture/ANDROID_SDK_INTEGRATION.md](../docs/architecture/ANDROID_SDK_INTEGRATION.md)
+- **Full system overview:** [../CLAUDE.md](../CLAUDE.md)
