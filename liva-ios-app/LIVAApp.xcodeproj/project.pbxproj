@@ -1,0 +1,407 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		09CE0E9981D02EFC3D777C7F /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D77EA18A62552F218295FD4E /* ChatView.swift */; };
+		0EEB2EAE17656580C575BAF9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D0C8D13A2731DBDCEF01A68 /* ContentView.swift */; };
+		25833B4CC471FC35023552BC /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AA430BF35AE128C5C456F03 /* LoginView.swift */; };
+		2FE891B521BBC278ADA28561 /* ChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 012965D46B6858BDF2441762 /* ChatViewModel.swift */; };
+		70D88C61C3F3C362101B7701 /* LIVAAnimation in Frameworks */ = {isa = PBXBuildFile; productRef = 6056DF3A5BF59A4BDB22E63B /* LIVAAnimation */; };
+		7AC69C345A18BA4F41955E8D /* Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F4441671097BD142D3056FE /* Message.swift */; };
+		82C4929B0B45863EFB581244 /* AgentSelectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07E7505EF0051176304AFB51 /* AgentSelectionView.swift */; };
+		8C1E74C07A471B1FF0A97AA6 /* AuthViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8CFA1367BF4AFF361D26FC5 /* AuthViewModel.swift */; };
+		AAC7ADFFFB01518069930C41 /* AgentViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EB2158BDB74C49CD9180491 /* AgentViewModel.swift */; };
+		AB3A6F3EF40C68A83CB19FCA /* LIVAApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A340226106578968A7864B7 /* LIVAApp.swift */; };
+		B54D022A3547AC8CAEE376B6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FD55B6BA1FED7227CDD459B /* SettingsView.swift */; };
+		C46107F8BEA387441B02CD5C /* LIVACanvasRepresentable.swift in Sources */ = {isa = PBXBuildFile; fileRef = B28F91C77DDDB6ACDFCEEB9C /* LIVACanvasRepresentable.swift */; };
+		E1DE734B32FE5496A8919939 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C2CC4CE719BC3FD5E9A8F70 /* AppConfig.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		012965D46B6858BDF2441762 /* ChatViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewModel.swift; sourceTree = "<group>"; };
+		07E7505EF0051176304AFB51 /* AgentSelectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSelectionView.swift; sourceTree = "<group>"; };
+		0D0C8D13A2731DBDCEF01A68 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		1EB2158BDB74C49CD9180491 /* AgentViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentViewModel.swift; sourceTree = "<group>"; };
+		295F22E5EC89041C8A6D4463 /* LIVAApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LIVAApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		330CD89607BB2FBC8536B491 /* liva-sdk-ios */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "liva-sdk-ios"; path = "../liva-sdk-ios"; sourceTree = SOURCE_ROOT; };
+		3C2CC4CE719BC3FD5E9A8F70 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		3F4441671097BD142D3056FE /* Message.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Message.swift; sourceTree = "<group>"; };
+		6A340226106578968A7864B7 /* LIVAApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LIVAApp.swift; sourceTree = "<group>"; };
+		6AA430BF35AE128C5C456F03 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		8D352EFBD44E4FCE16D15891 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		9FD55B6BA1FED7227CDD459B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		B28F91C77DDDB6ACDFCEEB9C /* LIVACanvasRepresentable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LIVACanvasRepresentable.swift; sourceTree = "<group>"; };
+		D77EA18A62552F218295FD4E /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		D8CFA1367BF4AFF361D26FC5 /* AuthViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthViewModel.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		378C2DBB82ED0EB72234007F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				70D88C61C3F3C362101B7701 /* LIVAAnimation in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1AE8C3FA4EA49B4667835855 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				330CD89607BB2FBC8536B491 /* liva-sdk-ios */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		30331A36428B122CF232DCF3 /* LIVAApp */ = {
+			isa = PBXGroup;
+			children = (
+				0D0C8D13A2731DBDCEF01A68 /* ContentView.swift */,
+				8D352EFBD44E4FCE16D15891 /* Info.plist */,
+				6A340226106578968A7864B7 /* LIVAApp.swift */,
+				FD3423D9E787622E5543D82E /* Config */,
+				B61723DDF9CEC65F5836E067 /* Models */,
+				A4F77C3F109AF874014916B4 /* ViewModels */,
+				EFD9412AC7ADA49FDCD98741 /* Views */,
+			);
+			path = LIVAApp;
+			sourceTree = "<group>";
+		};
+		51788B5ADCD33F4FC21180B5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				295F22E5EC89041C8A6D4463 /* LIVAApp.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		56EFA722DAA16D937F5126E3 = {
+			isa = PBXGroup;
+			children = (
+				30331A36428B122CF232DCF3 /* LIVAApp */,
+				1AE8C3FA4EA49B4667835855 /* Packages */,
+				51788B5ADCD33F4FC21180B5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A4F77C3F109AF874014916B4 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				1EB2158BDB74C49CD9180491 /* AgentViewModel.swift */,
+				D8CFA1367BF4AFF361D26FC5 /* AuthViewModel.swift */,
+				012965D46B6858BDF2441762 /* ChatViewModel.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		B61723DDF9CEC65F5836E067 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				3F4441671097BD142D3056FE /* Message.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		EFD9412AC7ADA49FDCD98741 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				07E7505EF0051176304AFB51 /* AgentSelectionView.swift */,
+				D77EA18A62552F218295FD4E /* ChatView.swift */,
+				B28F91C77DDDB6ACDFCEEB9C /* LIVACanvasRepresentable.swift */,
+				6AA430BF35AE128C5C456F03 /* LoginView.swift */,
+				9FD55B6BA1FED7227CDD459B /* SettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		FD3423D9E787622E5543D82E /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				3C2CC4CE719BC3FD5E9A8F70 /* AppConfig.swift */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		8A03C68267FD3927BB2F7CD6 /* LIVAApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 97C0D97229961022CC22C2F2 /* Build configuration list for PBXNativeTarget "LIVAApp" */;
+			buildPhases = (
+				4DCF1DBE4B05ACA8206DD0F3 /* Sources */,
+				378C2DBB82ED0EB72234007F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LIVAApp;
+			packageProductDependencies = (
+				6056DF3A5BF59A4BDB22E63B /* LIVAAnimation */,
+			);
+			productName = LIVAApp;
+			productReference = 295F22E5EC89041C8A6D4463 /* LIVAApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		53436885A3ACFD74C3252A05 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = 74002FEDB91007C57D9A2F89 /* Build configuration list for PBXProject "LIVAApp" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 56EFA722DAA16D937F5126E3;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				70E46F9C05446CC72940D717 /* XCLocalSwiftPackageReference "../liva-sdk-ios" */,
+			);
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				8A03C68267FD3927BB2F7CD6 /* LIVAApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		4DCF1DBE4B05ACA8206DD0F3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				82C4929B0B45863EFB581244 /* AgentSelectionView.swift in Sources */,
+				AAC7ADFFFB01518069930C41 /* AgentViewModel.swift in Sources */,
+				E1DE734B32FE5496A8919939 /* AppConfig.swift in Sources */,
+				8C1E74C07A471B1FF0A97AA6 /* AuthViewModel.swift in Sources */,
+				09CE0E9981D02EFC3D777C7F /* ChatView.swift in Sources */,
+				2FE891B521BBC278ADA28561 /* ChatViewModel.swift in Sources */,
+				0EEB2EAE17656580C575BAF9 /* ContentView.swift in Sources */,
+				AB3A6F3EF40C68A83CB19FCA /* LIVAApp.swift in Sources */,
+				C46107F8BEA387441B02CD5C /* LIVACanvasRepresentable.swift in Sources */,
+				25833B4CC471FC35023552BC /* LoginView.swift in Sources */,
+				7AC69C345A18BA4F41955E8D /* Message.swift in Sources */,
+				B54D022A3547AC8CAEE376B6 /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		363ACD21880ABDFC5604190B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = LIVAApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.liva.app;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		3FCFB21A900B4989C7E99E83 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C6E923EB67D5C4EF75DC03A5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		DDF57C68D72A2477306142C2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				CURRENT_PROJECT_VERSION = 1;
+				INFOPLIST_FILE = LIVAApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.liva.app;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		74002FEDB91007C57D9A2F89 /* Build configuration list for PBXProject "LIVAApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3FCFB21A900B4989C7E99E83 /* Debug */,
+				C6E923EB67D5C4EF75DC03A5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		97C0D97229961022CC22C2F2 /* Build configuration list for PBXNativeTarget "LIVAApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				363ACD21880ABDFC5604190B /* Debug */,
+				DDF57C68D72A2477306142C2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		70E46F9C05446CC72940D717 /* XCLocalSwiftPackageReference "../liva-sdk-ios" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../liva-sdk-ios";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		6056DF3A5BF59A4BDB22E63B /* LIVAAnimation */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LIVAAnimation;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 53436885A3ACFD74C3252A05 /* Project object */;
+}

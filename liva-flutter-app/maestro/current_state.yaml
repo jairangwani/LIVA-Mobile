@@ -1,7 +1,0 @@
-appId: com.liva.livaApp
----
-# Quick state check
-- waitForAnimationToEnd
-- waitForAnimationToEnd
-- waitForAnimationToEnd
-- takeScreenshot: screenshots/current_state

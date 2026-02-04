@@ -1,0 +1,47 @@
+name: LIVAApp
+options:
+  bundleIdPrefix: com.liva
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  LIVAAnimation:
+    path: ../liva-sdk-ios
+
+targets:
+  LIVAApp:
+    type: application
+    platform: iOS
+    sources:
+      - LIVAApp
+    dependencies:
+      - package: LIVAAnimation
+    settings:
+      base:
+        INFOPLIST_FILE: LIVAApp/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.liva.app
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: ""
+          CODE_SIGNING_REQUIRED: "NO"
+          CODE_SIGNING_ALLOWED: "NO"
+        Release:
+          CODE_SIGN_IDENTITY: ""
+          CODE_SIGNING_REQUIRED: "NO"
+          CODE_SIGNING_ALLOWED: "NO"
+    info:
+      path: LIVAApp/Info.plist
+      properties:
+        CFBundleName: "LIVA App"
+        CFBundleDisplayName: "LIVA App"
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        UILaunchStoryboardName: ""
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true

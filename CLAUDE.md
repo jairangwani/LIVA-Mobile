@@ -1,50 +1,19 @@
 # LIVA-Mobile
 
-Mobile SDKs for LIVA AI avatar system (iOS, Android, Flutter).
-
----
-
-## ANDROID SDK - CONTINUE HERE
-
-**Current Goal:** Get Android to play audio and video overlays like Web/iOS.
-
-**Status:** Backend socket fix complete. Ready for end-to-end testing.
-
-**Next Step:** Read `docs/ANDROID_SDK_NEXT_STEPS.md` and start Phase 1 testing.
-
-**Quick Test:**
-```bash
-# 1. Backend
-cd AnnaOS-API && python main.py
-
-# 2. Android app
-cd LIVA-Mobile/liva-android-app && ./gradlew installDebug
-# Launch app, wait for "Connected"
-
-# 3. Send message
-curl -X POST http://localhost:5003/messages \
-  -H "Content-Type: application/json" \
-  -H "X-User-ID: test_user_android" \
-  -d '{"AgentID": "1", "instance_id": "android_test", "message": "Hello"}'
-
-# 4. Check logs
-adb logcat -s "LIVAClient" "LIVASocketManager" | grep -E "(receive_audio|receive_frame)"
-```
-
-**If events NOT received:** Check backend uses `socketio.server.emit(..., namespace='/')`
+Mobile SDKs and native apps for LIVA AI avatar system (iOS, Android).
 
 ---
 
 ## Quick Start (iOS)
 
 ```bash
-cd LIVA-Mobile/liva-sdk-ios
+cd LIVA-Mobile/liva-ios-app
 
 # Open in Xcode
-open LIVAAnimation.xcodeproj
+open LIVAApp.xcodeproj
 
-# Or use Swift Package Manager
-# Add https://github.com/jairangwani/LIVA-Mobile as dependency
+# Or build from CLI
+xcodebuild -scheme LIVAApp -destination 'platform=iOS Simulator,name=iPhone 15 Pro' build
 ```
 
 **Requires:** Backend running on http://localhost:5003
@@ -62,36 +31,67 @@ LIVA-Mobile/
 │           │   ├── LIVAClient.swift           # Main SDK entry point
 │           │   ├── LIVAAnimationEngine.swift  # Animation rendering (Metal)
 │           │   ├── LIVASessionLogger.swift    # Session-based logging
-│           │   └── LIVAConfig.swift           # Configuration
-│           ├── Models/                        # Data models
-│           ├── Networking/                    # Socket.IO, HTTP
-│           └── UI/                            # SwiftUI views
-├── liva-sdk-android/                          # Android SDK (Kotlin)
-│   └── LIVAAnimationSDK/
-│       └── livaanimation/
-│           └── src/main/java/com/liva/livaanimation/
-│               ├── LIVAClient.kt              # Main SDK entry point
-│               ├── core/                       # Animation engine
-│               ├── network/                    # Socket.IO, HTTP
-│               ├── audio/                      # Audio playback
-│               └── models/                     # Data models
-├── liva-android-app/                          # Native Android test app
+│           │   ├── SocketManager.swift        # Socket.IO connection
+│           │   ├── Configuration.swift        # SDK configuration
+│           │   ├── LIVAImageCache.swift       # Image decode tracking
+│           │   └── CacheKeyGenerator.swift    # Cache utilities
+│           ├── Models/                        # Frame, AnimationChunk, AgentConfig
+│           ├── Rendering/                     # CanvasView, BaseFrameManager, FrameDecoder
+│           ├── Audio/                         # AudioPlayer
+│           └── Diagnostics/                   # LIVAPerformanceTracker
+├── liva-sdk-android/
+│   └── liva-animation/
+│       └── src/main/kotlin/com/liva/animation/
+│           ├── core/
+│           │   ├── LIVAClient.kt              # Main SDK entry point
+│           │   ├── SocketManager.kt           # Socket.IO connection (Dyte library)
+│           │   └── Configuration.kt           # SDK configuration
+│           ├── rendering/
+│           │   ├── AnimationEngine.kt         # Animation state, frame rendering
+│           │   ├── BaseFrameManager.kt        # Base frame cache
+│           │   ├── FrameDecoder.kt            # Base64 → Bitmap decoding
+│           │   └── LIVACanvasView.kt          # SurfaceView rendering
+│           ├── audio/
+│           │   ├── AudioPlayer.kt             # MP3 playback (ExoPlayer)
+│           │   └── AudioSyncManager.kt        # Audio-video sync
+│           ├── logging/
+│           │   └── SessionLogger.kt           # Session-based logging (matches iOS)
+│           └── models/
+│               └── Models.kt                  # Data classes
+├── liva-ios-app/                               # Native SwiftUI iOS app
+│   └── LIVAApp/                               # App source (SwiftUI, uses liva-sdk-ios via SPM)
+│       ├── Views/                             # ChatView, LoginView, AgentSelectionView, SettingsView
+│       ├── ViewModels/                        # ChatViewModel, AuthViewModel, AgentViewModel
+│       ├── Models/                            # Message
+│       └── Config/                            # AppConfig
+├── liva-android-app/                          # Native Kotlin Android app
 │   └── app/src/main/java/com/liva/testapp/
-│       └── MainActivity.kt                    # Test app entry point
-├── liva-flutter/                              # Flutter SDK (future, DO NOT USE FOR ANDROID)
+│       └── MainActivity.kt                    # App entry point (uses liva-sdk-android)
 └── CLAUDE.md                                  # This file
 ```
 
 ---
 
-## Key Files
+## Key Files (iOS)
 
 | File | Purpose |
 |------|---------|
 | `LIVAClient.swift` | Main SDK class, manages connection and session |
 | `LIVAAnimationEngine.swift` | Metal-based animation rendering |
 | `LIVASessionLogger.swift` | Sends logs to backend for debugging |
-| `LIVAOverlayManager.swift` | Manages lip sync overlay images |
+| `BaseFrameManager.swift` | Base frame cache and overlay management |
+| `LIVAImageCache.swift` | Decode tracking (`decodedKeys`, `isImageDecoded()`) |
+
+## Key Files (Android)
+
+| File | Purpose |
+|------|---------|
+| `LIVAClient.kt` | Main SDK class, manages connection and session |
+| `AnimationEngine.kt` | Animation state machine, frame rendering, audio-video sync |
+| `SocketManager.kt` | Socket.IO connection (Dyte library) |
+| `SessionLogger.kt` | Session-based logging (matches iOS format) |
+| `BaseFrameManager.kt` | Base frame cache |
+| `FrameDecoder.kt` | Base64 → Bitmap with async batch decoding |
 
 ---
 
@@ -218,8 +218,10 @@ timestamp|IOS|session|chunk|seq|anim|base|overlay|sync|fps|||
 cd ../AnnaOS-API && python main.py
 
 # 2. Start iOS app in simulator
-cd liva-flutter-app
-flutter run -d "iPhone 15 Pro"
+cd liva-ios-app
+xcodebuild -scheme LIVAApp -destination 'platform=iOS Simulator,name=iPhone 15 Pro' build
+xcrun simctl install booted ~/Library/Developer/Xcode/DerivedData/LIVAApp-*/Build/Products/Debug-iphonesimulator/LIVAApp.app
+xcrun simctl launch booted com.liva.app
 # WAIT 20+ seconds for socket to fully connect
 
 # 3. Send test messages via script
@@ -324,7 +326,7 @@ The iOS SDK implements instant startup with synchronous single-frame loading and
 - Defers frame loading until needed by backend
 
 **Socket Connection Deferral:**
-- Flutter app delays socket connection by 5 seconds after startup
+- Native iOS app delays socket connection by 5 seconds after initialization
 - Allows render loop to stabilize before network operations
 - Reduces main thread blocking during initialization
 
@@ -357,8 +359,8 @@ The iOS SDK implements instant startup with synchronous single-frame loading and
 - `loadSingleFrame()` - Fixed filename format (4-digit padding)
 - No longer loads all frames at startup
 
-**chat_screen.dart (Flutter):**
-- 5-second delay before `LIVAAnimation.connect()`
+**ChatViewModel.swift (Native iOS app):**
+- 5-second delay before `LIVAClient.shared.connect()`
 - Allows iOS render loop to stabilize
 
 ### Testing & Verification
@@ -473,49 +475,18 @@ See: [docs/IOS_ASYNC_PROCESSING_PLAN.md](docs/IOS_ASYNC_PROCESSING_PLAN.md) for 
 ### Quick Start (Android)
 
 ```bash
+# 1. Cold boot emulator (networking fix for API 34)
+# Android Studio > Device Manager > "..." > "Cold Boot Now"
+
+# 2. Setup port forwarding (required instead of 10.0.2.2)
+adb reverse tcp:5003 tcp:5003
+
+# 3. Build and install
 cd LIVA-Mobile/liva-android-app
-
-# Build and install
 ./gradlew installDebug
-
-# Or open in Android Studio
-# File > Open > select liva-android-app folder
 ```
 
-**Requires:** Backend running on http://10.0.2.2:5003 (Android emulator localhost)
-
-### Project Structure
-
-```
-liva-sdk-android/
-└── LIVAAnimationSDK/
-    └── livaanimation/
-        └── src/main/java/com/liva/livaanimation/
-            ├── LIVAClient.kt           # Main SDK entry point
-            ├── LIVAConfig.kt           # Configuration
-            ├── core/
-            │   ├── LIVAAnimationEngine.kt  # Animation rendering
-            │   └── FrameDecoder.kt         # Image decoding
-            ├── network/
-            │   └── WebSocketManager.kt     # Socket.IO connection
-            ├── audio/
-            │   └── AudioPlayer.kt          # Audio playback
-            └── models/
-                └── AnimationModels.kt      # Data classes
-
-liva-android-app/                    # Test app
-└── app/src/main/java/com/liva/testapp/
-    └── MainActivity.kt              # Test app (instanceId: "android_test")
-```
-
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| `LIVAClient.kt` | Main SDK class, manages connection and session |
-| `LIVAAnimationEngine.kt` | View-based animation rendering |
-| `WebSocketManager.kt` | Socket.IO connection (Dyte library) |
-| `AudioPlayer.kt` | Audio playback with ExoPlayer |
+**Requires:** Backend running on http://localhost:5003 (via `adb reverse`, NOT `10.0.2.2`)
 
 ### Testing Android
 
@@ -525,8 +496,8 @@ liva-android-app/                    # Test app
 # 1. Start backend
 cd AnnaOS-API && python main.py
 
-# 2. Start Android emulator
-emulator -avd Pixel_7_API_34  # or any AVD
+# 2. Cold boot emulator + setup port forwarding
+adb reverse tcp:5003 tcp:5003
 
 # 3. Install and run test app
 cd LIVA-Mobile/liva-android-app
@@ -536,12 +507,11 @@ adb shell am start -n com.liva.testapp/.MainActivity
 # 4. Send test message (use instance_id: "android_test")
 curl -X POST http://localhost:5003/messages \
   -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "test_user_android",
-    "agent_id": "1",
-    "instance_id": "android_test",
-    "message": "Hello from test script"
-  }'
+  -H "X-User-ID: test_user_android" \
+  -d '{"AgentID": "1", "instance_id": "android_test", "message": "Hello"}'
+
+# 5. View logs
+adb logcat -s "LIVAClient" "LIVASocketManager" "AnimationEngine" "SessionLogger"
 ```
 
 ### Android Socket.IO Library
@@ -553,10 +523,20 @@ Uses Dyte's SocketIO-Kotlin library (NOT official Java client):
 implementation("io.dyte:socketio-kotlin:1.0.8")
 ```
 
-**Why Dyte library:**
-- Works correctly with Flask-SocketIO 5.x
-- Proper namespace handling
-- Kotlin-native API
+**Why Dyte library:** Official Java client uses Engine.IO v3, incompatible with backend's Engine.IO v4. Dyte library works correctly with Flask-SocketIO 5.x.
+
+### Android Feature Parity with iOS
+
+| Feature | iOS | Android |
+|---------|-----|---------|
+| Session logging | LIVASessionLogger | SessionLogger.kt |
+| Async frame processing | Batched with yields | Batched with delay(0) |
+| Animation state machine | Mode enum | AnimationMode enum |
+| Buffer readiness (30 frames) | isBufferReady() | MIN_FRAMES_BEFORE_START=30 |
+| Skip-draw-on-wait | shouldSkipFrameAdvance | Skip-draw in getNextFrame |
+| Audio-video sync | Callback on first frame | triggerAudioForChunk callback |
+| Progressive loading | Idle first | Idle first |
+| Chunk synchronization | pendingBatchCount | pendingBatchCount |
 
 ### Critical Instance ID Note
 
@@ -564,7 +544,8 @@ The Android test app uses `instanceId = "android_test"`:
 
 ```kotlin
 // MainActivity.kt
-livaClient.connect(
+val config = LIVAConfiguration(
+    serverUrl = "http://localhost:5003",  // works via adb reverse
     userId = "test_user_android",
     agentId = "1",
     instanceId = "android_test"  // MUST match when sending test messages
@@ -652,21 +633,16 @@ If room found but Android not receiving events, the emit pattern is wrong.
 
 ---
 
-## Lessons Learned (Android SDK - 2026-01-28)
+## Gotchas (Android)
 
-### DO:
-- ✅ Use native Android SDK (`liva-sdk-android`), not Flutter
-- ✅ Use `socketio.server.emit()` with `namespace='/'` from background greenlets
-- ✅ Use Dyte SocketIO-Kotlin library for Android Socket.IO
-- ✅ Match `instance_id` when sending test messages
-- ✅ Use 10.0.2.2 for localhost from Android emulator
-- ✅ Check room name format: `{user_id}-{agent_id}-instance-{instance_id}`
+See also: [../docs/lessons/MOBILE.md](../docs/lessons/MOBILE.md) for full lessons learned.
 
-### DON'T:
-- ❌ Use Flutter for Android testing (missing AndroidManifest.xml issues)
-- ❌ Use `socketio.emit()` from background greenlets (fails for Android)
-- ❌ Assume events that work for web will work for Android
-- ❌ Use official Socket.IO Java client (compatibility issues with Flask-SocketIO 5.x)
+- Use `adb reverse tcp:5003 tcp:5003` + `localhost` (NOT `10.0.2.2`, unreliable on API 34)
+- Cold boot emulator when starting dev sessions (networking stack can corrupt)
+- Use `socketio.server.emit(..., namespace='/')` from background greenlets (NOT `socketio.emit()`)
+- Use Dyte SocketIO-Kotlin library (NOT official Java Socket.IO client)
+- Always match `instance_id` when sending test messages
+- Use native test app (`liva-android-app`), NOT Flutter for Android testing
 
 ---
 

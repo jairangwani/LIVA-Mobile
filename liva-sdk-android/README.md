@@ -10,42 +10,29 @@ Native Android SDK for integrating LIVA avatar animations into any Android appli
 
 ## Installation
 
-### Gradle (Recommended)
+### Local Module (Development)
+
+Add to your `settings.gradle.kts`:
+
+```kotlin
+include(":liva-animation")
+project(":liva-animation").projectDir = file("../liva-sdk-android/liva-animation")
+```
 
 Add to your module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.liva:animation:1.0.0")
-}
-```
-
-Add repository if not using Maven Central:
-
-```kotlin
-repositories {
-    maven { url = uri("https://jitpack.io") }
-}
-```
-
-### Manual AAR
-
-1. Download `liva-animation.aar` from releases
-2. Add to `libs/` folder
-3. Add dependency:
-
-```kotlin
-dependencies {
-    implementation(files("libs/liva-animation.aar"))
+    implementation(project(":liva-animation"))
 }
 ```
 
 ## Quick Start
 
 ```kotlin
-import com.liva.animation.LIVAClient
-import com.liva.animation.LIVACanvasView
-import com.liva.animation.LIVAConfiguration
+import com.liva.animation.core.LIVAClient
+import com.liva.animation.rendering.LIVACanvasView
+import com.liva.animation.core.Configuration
 
 class ChatActivity : AppCompatActivity() {
     private lateinit var livaCanvasView: LIVACanvasView
@@ -57,8 +44,8 @@ class ChatActivity : AppCompatActivity() {
         livaCanvasView = findViewById(R.id.livaCanvas)
 
         // Configure client
-        val config = LIVAConfiguration(
-            serverUrl = "https://api.liva.com",
+        val config = Configuration.LIVAConfiguration(
+            serverUrl = "http://localhost:5003",  // use adb reverse for emulator
             userId = "user-123",
             agentId = "1"
         )
@@ -75,24 +62,33 @@ class ChatActivity : AppCompatActivity() {
 
 ```
 liva-animation/
-├── src/main/kotlin/com/liva/animation/
-│   ├── core/
-│   │   ├── LIVAClient.kt         # Main SDK interface
-│   │   ├── SocketManager.kt      # Socket.IO handling
-│   │   └── Configuration.kt      # SDK configuration
-│   ├── rendering/
-│   │   ├── CanvasView.kt         # Native canvas view
-│   │   ├── FrameDecoder.kt       # Base64 → Bitmap
-│   │   └── AnimationEngine.kt    # Frame timing & queue
-│   ├── audio/
-│   │   ├── AudioPlayer.kt        # MP3 playback
-│   │   └── AudioSyncManager.kt   # Audio-video sync
-│   └── models/
-│       ├── Frame.kt              # Frame data model
-│       ├── AnimationChunk.kt     # Chunk metadata
-│       └── AgentConfig.kt        # Agent configuration
-└── src/main/AndroidManifest.xml
+└── src/main/kotlin/com/liva/animation/
+    ├── core/
+    │   ├── LIVAClient.kt           # Main SDK interface
+    │   ├── SocketManager.kt        # Socket.IO handling (Dyte library)
+    │   └── Configuration.kt        # SDK configuration
+    ├── rendering/
+    │   ├── LIVACanvasView.kt       # SurfaceView rendering
+    │   ├── AnimationEngine.kt      # Frame timing, state machine, audio-video sync
+    │   ├── BaseFrameManager.kt     # Base frame cache
+    │   └── FrameDecoder.kt         # Base64 → Bitmap decoding
+    ├── audio/
+    │   ├── AudioPlayer.kt          # MP3 playback (ExoPlayer)
+    │   └── AudioSyncManager.kt     # Audio-video sync manager
+    ├── logging/
+    │   └── SessionLogger.kt        # Session-based logging to backend
+    └── models/
+        └── Models.kt               # Data classes (Frame, AnimationChunk, etc.)
 ```
+
+## Key Features
+
+- **Session logging** — Logs frames to backend, viewable at `http://localhost:5003/logs`
+- **Async batch frame processing** — Prevents main thread blocking during overlay decoding
+- **Buffer readiness** — Waits for 30+ decoded frames before starting playback
+- **Skip-draw-on-wait** — Holds previous frame when overlay not yet decoded
+- **Audio-video sync** — Audio triggers on first overlay frame render, not on receive
+- **Progressive loading** — Loads idle animation first for instant startup
 
 ## API Reference
 
@@ -103,7 +99,7 @@ liva-animation/
 LIVAClient.getInstance()
 
 // Configure SDK
-fun configure(config: LIVAConfiguration)
+fun configure(config: Configuration.LIVAConfiguration)
 
 // Attach rendering view
 fun attachView(view: LIVACanvasView)
@@ -118,7 +114,7 @@ var onStateChange: ((LIVAState) -> Unit)?
 var onError: ((LIVAError) -> Unit)?
 ```
 
-### LIVAConfiguration
+### Configuration.LIVAConfiguration
 
 ```kotlin
 data class LIVAConfiguration(
@@ -130,25 +126,19 @@ data class LIVAConfiguration(
 )
 ```
 
-### LIVACanvasView
+## Emulator Networking
 
-```kotlin
-class LIVACanvasView : SurfaceView {
-    // Rendering happens automatically when attached to LIVAClient
-}
+**Use `adb reverse`, NOT `10.0.2.2`** (unreliable on API 34):
+
+```bash
+# After emulator boots
+adb reverse tcp:5003 tcp:5003
+
+# Then use localhost in app code
+val config = LIVAConfiguration(serverUrl = "http://localhost:5003", ...)
 ```
 
-### LIVAState
-
-```kotlin
-sealed class LIVAState {
-    object Idle : LIVAState()
-    object Connecting : LIVAState()
-    object Connected : LIVAState()
-    object Animating : LIVAState()
-    data class Error(val error: LIVAError) : LIVAState()
-}
-```
+Cold boot the emulator when starting dev sessions — network stack can become corrupted with snapshots.
 
 ## Thread Safety
 
@@ -172,12 +162,12 @@ If using ProGuard/R8, add:
 -keep class io.socket.** { *; }
 ```
 
-## Example Project
+## Test App
 
-See `example/` for a complete integration example.
+See `liva-android-app/` for a native Android test app:
 
 ```bash
-cd example
+cd liva-android-app
 ./gradlew installDebug
 ```
 

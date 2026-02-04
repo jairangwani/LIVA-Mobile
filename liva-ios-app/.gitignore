@@ -1,0 +1,16 @@
+## Xcode
+xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xccheckout
+*.moved-aside
+
+## SPM
+.swiftpm/
+.build/
+Package.resolved
