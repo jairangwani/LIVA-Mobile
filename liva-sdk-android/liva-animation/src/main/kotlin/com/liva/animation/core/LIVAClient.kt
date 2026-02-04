@@ -98,8 +98,18 @@ class LIVAClient private constructor() {
     private val pendingBatchCount = mutableMapOf<Int, Int>()
     private val batchLock = Any()
 
-    // Track which chunks have received chunk_images_ready but were deferred
-    private val deferredChunkReady = mutableMapOf<Int, Int>()  // chunkIndex -> totalSent
+    // Raw frame metadata per chunk (for building OverlaySections before all bitmaps decode)
+    private val currentChunkFrameData = mutableMapOf<Int, MutableList<com.liva.animation.models.FrameData>>()
+
+    // Track chunks that have received audio but not yet been enqueued to engine
+    // Used to gate audio_end/play_base_animation until all chunks are processed
+    private val pendingChunkIndices = mutableSetOf<Int>()
+    private var audioEndPending = false
+
+    // 1x1 transparent placeholder for frames not yet decoded (skip-draw handles rendering)
+    private val placeholderBitmap: android.graphics.Bitmap by lazy {
+        android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
+    }
 
     // MARK: - Base Frame Loading State
 
@@ -196,7 +206,9 @@ class LIVAClient private constructor() {
         pendingOverlayPositions.clear()
         synchronized(batchLock) {
             pendingBatchCount.clear()
-            deferredChunkReady.clear()
+            currentChunkFrameData.clear()
+            pendingChunkIndices.clear()
+            audioEndPending = false
         }
 
         // Force idle and clear all caches
@@ -384,10 +396,13 @@ class LIVAClient private constructor() {
                 pendingOverlayPositions.clear()
                 synchronized(batchLock) {
                     pendingBatchCount.clear()
-                    deferredChunkReady.clear()
+                    currentChunkFrameData.clear()
                 }
                 animationEngine?.forceIdleNow()
             }
+
+            // Start new message lifecycle - blocks premature idle transitions
+            animationEngine?.startNewMessage()
 
             // Log event
             SessionLogger.getInstance().logEvent("NEW_MESSAGE", mapOf(
@@ -398,6 +413,11 @@ class LIVAClient private constructor() {
         // Update state to animating
         if (state == LIVAState.Connected) {
             state = LIVAState.Animating
+        }
+
+        // Track this chunk as pending (not yet enqueued to engine)
+        synchronized(batchLock) {
+            pendingChunkIndices.add(audioChunk.chunkIndex)
         }
 
         // AUDIO-VIDEO SYNC: Queue audio in animation engine (don't play immediately)
@@ -418,50 +438,35 @@ class LIVAClient private constructor() {
         val chunkIndex = frameBatch.chunkIndex
         val frames = frameBatch.frames
 
-        // Increment pending batch count IMMEDIATELY (track pending work)
+        // Store raw frame metadata immediately (for early section building)
+        // and increment pending batch count
         synchronized(batchLock) {
+            if (currentChunkFrameData[chunkIndex] == null) {
+                currentChunkFrameData[chunkIndex] = mutableListOf()
+            }
+            currentChunkFrameData[chunkIndex]!!.addAll(frames)
             pendingBatchCount[chunkIndex] = (pendingBatchCount[chunkIndex] ?: 0) + 1
         }
 
-        // Process in background with batching and yields
+        // Decode in background - populates FrameDecoder's imageCache + decodedKeys.
+        // The OverlaySection is built on chunk_images_ready from metadata; the engine's
+        // skip-draw + decode-check gate playback until bitmaps are actually ready.
         scope.launch(Dispatchers.Default) {
-            // Process first frame immediately (unblock playback)
-            if (frames.isNotEmpty()) {
-                val firstFrameDecoded = frameDecoder?.decodeBatch(
-                    frameBatch.copy(frames = listOf(frames[0]))
-                ) ?: emptyList()
-
-                if (firstFrameDecoded.isNotEmpty()) {
-                    synchronized(currentChunkFrames) {
-                        if (currentChunkFrames[chunkIndex] == null) {
-                            currentChunkFrames[chunkIndex] = mutableListOf()
-                        }
-                        currentChunkFrames[chunkIndex]?.addAll(firstFrameDecoded)
-                    }
-                }
-            }
-
-            // Process remaining frames in batches of 15 with yields
+            // Decode in sub-batches of 15 with yields to avoid blocking
             val BATCH_SIZE = 15
-            for (i in 1 until frames.size step BATCH_SIZE) {
+            for (i in frames.indices step BATCH_SIZE) {
                 val batchEnd = minOf(i + BATCH_SIZE, frames.size)
                 val batch = frames.subList(i, batchEnd)
 
-                // Decode batch
-                val decodedBatch = frameDecoder?.decodeBatch(
+                frameDecoder?.decodeBatch(
                     frameBatch.copy(frames = batch)
-                ) ?: emptyList()
+                )
 
-                // Store results
-                synchronized(currentChunkFrames) {
-                    currentChunkFrames[chunkIndex]?.addAll(decodedBatch)
-                }
-
-                // Yield to event loop (prevent blocking)
-                delay(0)
+                // Yield to other coroutines
+                if (batchEnd < frames.size) delay(0)
             }
 
-            // Decrement pending count and check if all batches complete
+            // Decrement pending count
             withContext(Dispatchers.Main) {
                 onBatchComplete(chunkIndex)
             }
@@ -469,59 +474,36 @@ class LIVAClient private constructor() {
     }
 
     private fun onBatchComplete(chunkIndex: Int) {
-        val allBatchesComplete = synchronized(batchLock) {
+        synchronized(batchLock) {
             val count = pendingBatchCount[chunkIndex] ?: 0
             if (count > 1) {
                 pendingBatchCount[chunkIndex] = count - 1
-                false
             } else {
                 pendingBatchCount.remove(chunkIndex)
-                true
+                android.util.Log.d(TAG, "All batches decoded for chunk $chunkIndex (cache populated)")
             }
         }
-
-        if (allBatchesComplete) {
-            android.util.Log.d(TAG, "All batches complete for chunk $chunkIndex")
-
-            // Check if we deferred chunk_ready for this chunk
-            val totalSent = synchronized(batchLock) {
-                deferredChunkReady.remove(chunkIndex)
-            }
-
-            if (totalSent != null) {
-                android.util.Log.d(TAG, "Processing deferred chunk_ready for chunk $chunkIndex")
-                processChunkReady(chunkIndex, totalSent)
-            }
-        }
+        // No deferred processing needed - sections are created immediately on chunk_images_ready.
+        // Background decode populates FrameDecoder cache; engine's skip-draw gates playback.
     }
 
     private fun handleChunkReady(chunkIndex: Int, totalSent: Int) {
-        // Check if batches are still processing
-        val hasPendingBatches = synchronized(batchLock) {
-            pendingBatchCount.containsKey(chunkIndex)
-        }
-
-        if (hasPendingBatches) {
-            android.util.Log.d(TAG, "Deferring chunk_ready for chunk $chunkIndex (batches still processing)")
-            // Store for later processing when batches complete
-            synchronized(batchLock) {
-                deferredChunkReady[chunkIndex] = totalSent
-            }
-            return
-        }
-
+        // STREAMING DECODE: Create section immediately - don't wait for all batches to finish.
+        // The engine's decode-check in the advancement loop + skip-draw gates playback
+        // until bitmaps are actually decoded in the FrameDecoder cache.
         processChunkReady(chunkIndex, totalSent)
     }
 
     private fun processChunkReady(chunkIndex: Int, totalSent: Int) {
-        // Get all frames for this chunk
-        val frames: List<DecodedFrame>
-        synchronized(currentChunkFrames) {
-            frames = currentChunkFrames[chunkIndex]?.toList() ?: emptyList()
+        // STREAMING DECODE: Build OverlaySection from raw frame metadata.
+        // Use decoded bitmap from FrameDecoder cache where available, placeholder otherwise.
+        // The engine's decode-check prevents advancing past undecoded frames.
+        val frameDataList: List<com.liva.animation.models.FrameData> = synchronized(batchLock) {
+            currentChunkFrameData[chunkIndex]?.toList() ?: emptyList()
         }
 
-        if (frames.isEmpty()) {
-            android.util.Log.w(TAG, "No frames available for chunk $chunkIndex - cannot build OverlaySection")
+        if (frameDataList.isEmpty()) {
+            android.util.Log.w(TAG, "No frame data for chunk $chunkIndex - cannot build OverlaySection")
             return
         }
 
@@ -529,54 +511,134 @@ class LIVAClient private constructor() {
         val overlayPosition = pendingOverlayPositions[chunkIndex] ?: PointF(0f, 0f)
         val zoneTopLeft = Pair(overlayPosition.x.toInt(), overlayPosition.y.toInt())
 
-        // Build OverlaySection (matches iOS processChunkReady)
-        val sortedFrames = frames.sortedBy { it.sequenceIndex }
-        val animationName = sortedFrames.firstOrNull()?.animationName ?: ""
+        // Build DecodedFrames from metadata + cache
+        val sortedData = frameDataList.sortedBy { it.sequenceIndex }
+        val animationName = sortedData.firstOrNull()?.animationName ?: ""
+
+        var decodedCount = 0
+        val frames = sortedData.map { fd ->
+            val cacheKey = generateCacheKey(fd, chunkIndex)
+            val cachedBitmap = frameDecoder?.getImage(cacheKey)
+            if (cachedBitmap != null) decodedCount++
+
+            DecodedFrame(
+                image = cachedBitmap ?: placeholderBitmap,
+                sequenceIndex = fd.sequenceIndex,
+                animationName = fd.animationName,
+                coordinates = parseFrameCoordinates(fd.coordinates, fd.zoneTopLeft),
+                matchedSpriteFrameNumber = fd.matchedSpriteFrameNumber,
+                overlayId = cacheKey,
+                sheetFilename = fd.sheetFilename,
+                char = fd.char,
+                sectionIndex = fd.sectionIndex,
+                originalFrameIndex = fd.frameIndex
+            )
+        }
 
         val overlaySection = OverlaySection(
-            frames = sortedFrames,
+            frames = frames,
             chunkIndex = chunkIndex,
-            sectionIndex = 0,  // Single section per chunk in current backend
+            sectionIndex = 0,
             animationName = animationName,
             zoneTopLeft = zoneTopLeft,
-            totalFrames = sortedFrames.size
+            totalFrames = frames.size
         )
 
-        // Enqueue to animation engine (new iOS-style method)
+        // Enqueue to animation engine
         animationEngine?.enqueueOverlaySection(overlaySection)
 
-        android.util.Log.d(TAG, "✅ Built OverlaySection: chunk=$chunkIndex, frames=${sortedFrames.size}, anim=$animationName")
+        android.util.Log.d(TAG, "✅ Built OverlaySection: chunk=$chunkIndex, " +
+            "frames=${frames.size}, decoded=$decodedCount/${frames.size}, anim=$animationName")
 
         // Log event
         SessionLogger.getInstance().logEvent("CHUNK_READY", mapOf(
             "chunk" to chunkIndex,
-            "frames" to sortedFrames.size,
+            "frames" to frames.size,
+            "decoded" to decodedCount,
             "animation" to animationName
         ))
 
-        // Clean up stored frames
+        // Clean up stored metadata and frame data
+        synchronized(batchLock) {
+            currentChunkFrameData.remove(chunkIndex)
+        }
         synchronized(currentChunkFrames) {
             currentChunkFrames.remove(chunkIndex)
         }
         pendingOverlayPositions.remove(chunkIndex)
+
+        // Remove from pending and check if we should deliver deferred audio_end
+        val shouldDeliverAudioEnd = synchronized(batchLock) {
+            pendingChunkIndices.remove(chunkIndex)
+            audioEndPending && pendingChunkIndices.isEmpty()
+        }
+
+        if (shouldDeliverAudioEnd) {
+            android.util.Log.d(TAG, "📭 All pending chunks enqueued - delivering deferred audio_end")
+            animationEngine?.markAudioEndReceived()
+        }
+    }
+
+    /** Generate cache key matching FrameDecoder's key generation logic. */
+    private fun generateCacheKey(fd: com.liva.animation.models.FrameData, chunkIndex: Int): String {
+        return fd.overlayId
+            ?: if (fd.animationName.isNotEmpty() && fd.sheetFilename.isNotEmpty()) {
+                "${fd.animationName}/${fd.spriteIndexFolder}/${fd.sheetFilename}"
+            } else {
+                "frame_${chunkIndex}_${fd.sequenceIndex}"
+            }
+    }
+
+    /** Parse coordinates from backend format (matches FrameDecoder.parseCoordinates). */
+    private fun parseFrameCoordinates(coords: List<Float>?, zoneTopLeft: List<Int>?): android.graphics.RectF {
+        if (coords != null && coords.size >= 4) {
+            return android.graphics.RectF(coords[0], coords[1], coords[0] + coords[2], coords[1] + coords[3])
+        }
+        if (zoneTopLeft != null && zoneTopLeft.size >= 2) {
+            val x = zoneTopLeft[0].toFloat()
+            val y = zoneTopLeft[1].toFloat()
+            return android.graphics.RectF(x, y, x + 300f, y + 300f)
+        }
+        return android.graphics.RectF()
     }
 
     private fun handleAudioEnd() {
-        // Audio streaming is complete, animation will transition to idle
-        // after current frames are played
-        animationEngine?.onAnimationComplete = {
-            if (state == LIVAState.Animating) {
-                state = LIVAState.Connected
+        // Audio streaming is complete - no more chunks coming from backend.
+        // If chunks are still being decoded, defer the signal until all are enqueued.
+        val hasPending = synchronized(batchLock) {
+            if (pendingChunkIndices.isNotEmpty()) {
+                audioEndPending = true
+                true
+            } else {
+                false
             }
-            animationEngine?.transitionToIdle()
+        }
+
+        if (hasPending) {
+            android.util.Log.d(TAG, "📭 audio_end received but chunks still pending - deferring")
+        } else {
+            android.util.Log.d(TAG, "📭 audio_end received - all chunks enqueued, marking end")
+            animationEngine?.markAudioEndReceived()
         }
     }
 
     private fun handlePlayBaseAnimation(animationName: String) {
-        // Handle base/idle animation request
-        animationEngine?.transitionToIdle()
-        if (state == LIVAState.Animating) {
-            state = LIVAState.Connected
+        // Backend sends play_base_animation when message processing is complete.
+        // Same gating logic as audio_end.
+        val hasPending = synchronized(batchLock) {
+            if (pendingChunkIndices.isNotEmpty()) {
+                audioEndPending = true
+                true
+            } else {
+                false
+            }
+        }
+
+        if (hasPending) {
+            android.util.Log.d(TAG, "📭 play_base_animation received but chunks still pending - deferring")
+        } else {
+            android.util.Log.d(TAG, "📭 play_base_animation received - all chunks enqueued, marking end")
+            animationEngine?.markAudioEndReceived()
         }
     }
 
@@ -682,6 +744,15 @@ class LIVAClient private constructor() {
             // Chunk animation complete - logging/tracking if needed
         }
 
+        // All chunks complete - message fully played
+        animationEngine?.onAllChunksComplete = {
+            android.util.Log.d(TAG, "🏁 All chunks complete - message fully played")
+            audioPlayer?.stop()
+            if (state == LIVAState.Animating) {
+                state = LIVAState.Connected
+            }
+        }
+
         // AUDIO-VIDEO SYNC: Trigger audio playback when first frame renders
         animationEngine?.onStartAudioForChunk = { chunkIndex, audioData ->
             // Called by animation engine when first overlay frame is about to render
@@ -703,11 +774,8 @@ class LIVAClient private constructor() {
         }
 
         audioPlayer?.onPlaybackComplete = {
-            // All audio complete
-            animationEngine?.transitionToIdle()
-            if (state == LIVAState.Animating) {
-                state = LIVAState.Connected
-            }
+            // All audio complete - engine handles idle transition via onAllChunksComplete
+            android.util.Log.d(TAG, "Audio playback complete")
         }
     }
 

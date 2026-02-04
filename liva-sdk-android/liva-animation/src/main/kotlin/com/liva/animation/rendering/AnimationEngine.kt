@@ -52,8 +52,10 @@ data class QueuedAnimationChunk(
 internal class AnimationEngine {
 
     companion object {
-        // Match iOS/Web buffer requirements
-        const val MIN_FRAMES_BEFORE_START = 30
+        // Reduced from 30 to 5: decode-gated advancement in getNextFrame() now prevents
+        // the frame counter from advancing past undecoded frames, so a large buffer isn't
+        // needed. Small buffer gives faster startup while decode-gate provides safety net.
+        const val MIN_FRAMES_BEFORE_START = 5
         const val TARGET_FPS = 30.0
         const val FRAME_INTERVAL_MS = 1000.0 / TARGET_FPS  // 33.33ms
     }
@@ -135,6 +137,18 @@ internal class AnimationEngine {
     // All chunks complete callback (like iOS animationEngineDidFinishAllChunks)
     var onAllChunksComplete: (() -> Unit)? = null
 
+    // MARK: - Message Lifecycle State
+
+    // Tracks whether a message is actively being processed (audio chunks arriving)
+    // Prevents premature idle transition when overlay queue empties between chunks
+    private var messageActive = false
+
+    // Set to true when audio_end event arrives (no more chunks coming)
+    private var audioEndReceived = false
+
+    // Next expected chunk index (for ordering - prevents chunk 3 playing before chunk 2)
+    private var nextExpectedChunkIndex = 0
+
     // MARK: - Audio Sync State
 
     // Audio data queued per chunk (waiting for animation sync)
@@ -195,6 +209,41 @@ internal class AnimationEngine {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // MARK: - Message Lifecycle
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Mark the start of a new message (called when chunk 0 audio arrives).
+     * Prevents premature idle transitions while chunks are still incoming.
+     */
+    fun startNewMessage() {
+        messageActive = true
+        audioEndReceived = false
+        nextExpectedChunkIndex = 0
+        Log.d(TAG, "📨 Message started - idle transitions blocked until audio_end")
+    }
+
+    /**
+     * Mark that audio_end has been received (no more chunks coming from backend).
+     * If the engine has already finished all queued sections, transition to idle now.
+     */
+    fun markAudioEndReceived() {
+        audioEndReceived = true
+        Log.d(TAG, "📭 audio_end received - will idle when all sections complete")
+
+        // If no section is playing and queue is empty, idle now
+        if (currentOverlaySection == null) {
+            val queueEmpty = overlayQueueLock.withLock { overlayQueue.isEmpty() }
+            if (queueEmpty) {
+                Log.d(TAG, "🎉 No pending sections after audio_end - transitioning to idle")
+                messageActive = false
+                transitionToIdle()
+                onAllChunksComplete?.invoke()
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // MARK: - NEW: Overlay Section Management (iOS-style)
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -209,8 +258,9 @@ internal class AnimationEngine {
             Log.d(TAG, "Enqueued overlay section: chunk=${section.chunkIndex}, frames=${section.frames.size}")
         }
 
-        // If not currently playing, try to start
-        if (currentOverlaySection == null && mode != AnimationMode.TALKING) {
+        // If no section is currently playing, try to start the next one
+        // This handles both initial start AND resuming after waiting between chunks
+        if (currentOverlaySection == null) {
             tryStartNextSection()
         }
     }
@@ -235,6 +285,12 @@ internal class AnimationEngine {
         val nextSection = overlayQueueLock.withLock {
             overlayQueue.firstOrNull()
         } ?: return
+
+        // Only start if this is the expected next chunk (preserve order)
+        if (messageActive && nextSection.chunkIndex > nextExpectedChunkIndex) {
+            Log.d(TAG, "⏳ Chunk ${nextSection.chunkIndex} queued but waiting for chunk $nextExpectedChunkIndex first")
+            return
+        }
 
         // Check buffer readiness
         if (!isBufferReady(nextSection)) {
@@ -335,6 +391,19 @@ internal class AnimationEngine {
                 break
             }
 
+            // STREAMING DECODE: Check if next frame's overlay is decoded before advancing.
+            // Without this, frame counter races ahead of background decoding and the
+            // section completes before frames actually render (all skip-drawn).
+            val nextIdx = section.currentDrawingFrame + 1
+            if (nextIdx < section.frames.size) {
+                val nextKey = section.frames[nextIdx].overlayId
+                if (nextKey != null && frameDecoder?.isImageDecoded(nextKey) == false) {
+                    // Next frame not yet decoded - hold current frame, retry next render cycle
+                    frameAccumulator = 0.0
+                    break
+                }
+            }
+
             section.currentDrawingFrame++
 
             // Check if section complete
@@ -414,6 +483,7 @@ internal class AnimationEngine {
      */
     private fun onSectionComplete(section: OverlaySection) {
         Log.d(TAG, "✅ Section complete: chunk=${section.chunkIndex}")
+        nextExpectedChunkIndex = section.chunkIndex + 1
         onChunkComplete?.invoke(section.chunkIndex)
 
         // Try to start next section
@@ -422,10 +492,18 @@ internal class AnimationEngine {
         if (hasNext) {
             currentOverlaySection = null
             tryStartNextSection()
+        } else if (messageActive && !audioEndReceived) {
+            // More chunks expected but not yet received/decoded - hold last frame
+            // Do NOT transition to idle or clear audio queue
+            Log.d(TAG, "⏳ Queue empty but message active - holding last frame, waiting for next chunk")
+            currentOverlaySection = null
+            // Stay in TALKING mode so we keep rendering at 30fps
+            // and can immediately start next section when it arrives
         } else {
-            // All chunks complete - transition to idle
+            // All chunks truly complete (audio_end received or no active message)
             Log.d(TAG, "🎉 All overlay chunks complete - transitioning to idle")
             currentOverlaySection = null
+            messageActive = false
             transitionToIdle()
             onAllChunksComplete?.invoke()
         }
@@ -639,6 +717,11 @@ internal class AnimationEngine {
 
         // Clear audio state
         clearAudioQueue()
+
+        // Reset message lifecycle
+        messageActive = false
+        audioEndReceived = false
+        nextExpectedChunkIndex = 0
 
         // Reset state
         holdingLastFrame = false

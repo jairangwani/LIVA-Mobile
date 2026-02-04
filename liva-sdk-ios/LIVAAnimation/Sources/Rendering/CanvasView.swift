@@ -55,7 +55,7 @@ public class LIVACanvasView: UIView {
     // MARK: - Debug
 
     /// Show debug overlay
-    public var showDebugInfo: Bool = true  // Default ON for testing
+    public var showDebugInfo: Bool = false
 
     /// Frame counter for FPS calculation
     private var frameCount = 0
@@ -90,7 +90,7 @@ public class LIVACanvasView: UIView {
 
     private func setupView() {
         backgroundColor = .clear
-        contentMode = .scaleAspectFit
+        contentMode = .scaleAspectFill
         isOpaque = false
         clipsToBounds = true
 
@@ -101,7 +101,7 @@ public class LIVACanvasView: UIView {
     private func setupLayers() {
         // Base image layer
         baseImageLayer = CALayer()
-        baseImageLayer?.contentsGravity = .resizeAspect
+        baseImageLayer?.contentsGravity = .resizeAspectFill
         baseImageLayer?.contentsScale = UIScreen.main.scale
         layer.addSublayer(baseImageLayer!)
 
@@ -174,13 +174,16 @@ public class LIVACanvasView: UIView {
             return
         }
 
-        // Calculate aspect-fit scaling
+        // Base layer fills entire view; contentsGravity handles aspect-fill
+        baseImageLayer?.frame = bounds
+
+        // Calculate aspect-fill scale for overlay positioning
         let imageSize = baseImage.size
         let viewSize = bounds.size
 
         let widthRatio = viewSize.width / imageSize.width
         let heightRatio = viewSize.height / imageSize.height
-        contentScale = min(widthRatio, heightRatio)
+        contentScale = max(widthRatio, heightRatio)
 
         contentSize = CGSize(
             width: imageSize.width * contentScale,
@@ -190,12 +193,6 @@ public class LIVACanvasView: UIView {
         contentOffset = CGPoint(
             x: (viewSize.width - contentSize.width) / 2,
             y: (viewSize.height - contentSize.height) / 2
-        )
-
-        // Update base layer frame
-        baseImageLayer?.frame = CGRect(
-            origin: contentOffset,
-            size: contentSize
         )
     }
 
@@ -209,12 +206,12 @@ public class LIVACanvasView: UIView {
         // Clear the context
         context.clear(rect)
 
-        // Draw base frame (aspect fit)
+        // Draw base frame (aspect fill)
         if let base = baseFrame {
             let imageSize = base.size
             let widthRatio = rect.width / imageSize.width
             let heightRatio = rect.height / imageSize.height
-            let scale = min(widthRatio, heightRatio)
+            let scale = max(widthRatio, heightRatio)
 
             let scaledSize = CGSize(
                 width: imageSize.width * scale,
@@ -278,7 +275,7 @@ public class LIVACanvasView: UIView {
             )
 
             let overlayLayer = CALayer()
-            overlayLayer.contentsGravity = .resizeAspect
+            overlayLayer.contentsGravity = .resizeAspectFill
             overlayLayer.contentsScale = UIScreen.main.scale
             overlayLayer.contents = overlayImage.cgImage
             overlayLayer.frame = CGRect(origin: scaledPosition, size: overlayScaledSize)
