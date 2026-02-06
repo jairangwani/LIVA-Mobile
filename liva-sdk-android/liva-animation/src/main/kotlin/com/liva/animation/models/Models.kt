@@ -81,7 +81,11 @@ data class OverlaySection(
     var done: Boolean = false,
     var holdingLastFrame: Boolean = false,  // JITTER FIX: Hold while waiting for next chunk
     var startTime: Long? = null,            // For time-based frame advancement
-    var audioStarted: Boolean = false
+    var audioStarted: Boolean = false,
+
+    // Audio-paced frame advancement: sync overlay to audio playback position
+    var audioTriggerTime: Long? = null,     // SystemClock.elapsedRealtime() when audio triggered
+    var audioDurationMs: Long = 0           // PCM-computed duration for this chunk's audio
 )
 
 /**

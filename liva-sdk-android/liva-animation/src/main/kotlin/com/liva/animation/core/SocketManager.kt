@@ -50,6 +50,9 @@ internal class LIVASocketManager(
     var onBaseFrameReceived: ((animationName: String, frameIndex: Int, imageData: ByteArray) -> Unit)? = null
     var onAnimationFramesComplete: ((animationName: String) -> Unit)? = null
 
+    // Manifest callback
+    var onAnimationsManifest: ((animations: Map<String, ManifestAnimationInfo>) -> Unit)? = null
+
     // MARK: - Connection State
 
     val isConnected: Boolean
@@ -110,6 +113,18 @@ internal class LIVASocketManager(
         socket?.emit("request_specific_base_animation", data)
     }
 
+    /**
+     * Request the animations manifest for cache validation.
+     * Backend responds with animation names, frame counts, and version hashes.
+     */
+    fun requestAnimationsManifest(agentId: String) {
+        Log.d(TAG, "Requesting animations manifest for agent: $agentId")
+        val data = JSONObject().apply {
+            put("agentId", agentId)
+        }
+        socket?.emit("request_base_animations_manifest", data)
+    }
+
     // MARK: - Event Handlers
 
     private fun setupEventHandlers() {
@@ -146,6 +161,10 @@ internal class LIVASocketManager(
         sock.on(Socket.EVENT_CONNECT_ERROR) { args ->
             val error = args.firstOrNull()?.toString() ?: "Unknown error"
             Log.e(TAG, "Connection error: $error")
+            // Log cause chain for debugging (the real error is often in the cause)
+            (args.firstOrNull() as? Exception)?.cause?.let { cause ->
+                Log.e(TAG, "Connection error cause: ${cause.message}")
+            }
             scope.launch(Dispatchers.Main) {
                 onError?.invoke(LIVAError.ConnectionFailed(error))
             }
@@ -193,6 +212,11 @@ internal class LIVASocketManager(
 
         sock.on("animation_frames_complete") { args ->
             handleAnimationFramesCompleteEvent(args)
+        }
+
+        // Manifest event (for cache validation)
+        sock.on("base_animations_manifest") { args ->
+            handleAnimationsManifestEvent(args)
         }
     }
 
@@ -385,6 +409,38 @@ internal class LIVASocketManager(
         }
     }
 
+    private fun handleAnimationsManifestEvent(args: Array<Any>) {
+        try {
+            val data = args.firstOrNull() as? JSONObject ?: return
+
+            if (data.has("error")) {
+                Log.e(TAG, "Manifest error: ${data.optString("error")}")
+                return
+            }
+
+            val animationsObj = data.optJSONObject("animations") ?: return
+            val animations = mutableMapOf<String, ManifestAnimationInfo>()
+
+            val keys = animationsObj.keys()
+            while (keys.hasNext()) {
+                val name = keys.next() as String
+                val animObj = animationsObj.optJSONObject(name) ?: continue
+                animations[name] = ManifestAnimationInfo(
+                    frames = animObj.optInt("frames", 0),
+                    version = animObj.optString("version", "")
+                )
+            }
+
+            Log.d(TAG, "Received animations manifest: ${animations.size} animations")
+
+            scope.launch(Dispatchers.Main) {
+                onAnimationsManifest?.invoke(animations)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing animations manifest: ${e.message}")
+        }
+    }
+
     private fun handlePlayAnimationEvent(args: Array<Any>) {
         try {
             val data = args.firstOrNull() as? JSONObject ?: return
@@ -507,4 +563,12 @@ data class AnimationFrameChunk(
     val zoneTopLeft: Pair<Int, Int>,
     val masterFramePlayAt: Int,
     val mode: String
+)
+
+/**
+ * Animation info from backend manifest (for cache validation).
+ */
+data class ManifestAnimationInfo(
+    val frames: Int,
+    val version: String
 )

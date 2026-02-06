@@ -3,6 +3,7 @@ package com.liva.animation.rendering
 import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
+import android.util.Log
 import android.view.Choreographer
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -41,11 +42,15 @@ class LIVACanvasView @JvmOverloads constructor(
         isFilterBitmap = true
     }
 
-    // Feathered overlay rendering
+    // Feathered overlay rendering — double-buffered to prevent flicker.
+    // While the SurfaceHolder draws buffer A, we prepare buffer B for the next frame.
     private val featherInner = 0.4f
     private val featherOuter = 0.5f
-    private var featheredOverlayBitmap: Bitmap? = null
-    private var featheredOverlayCanvas: Canvas? = null
+    private var featheredBitmapA: Bitmap? = null
+    private var featheredCanvasA: Canvas? = null
+    private var featheredBitmapB: Bitmap? = null
+    private var featheredCanvasB: Canvas? = null
+    private var useBufferA = true  // Toggle each frame
     private val xfermodeClear = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
 
     // Idle frame rate throttling (R57 fix)
@@ -55,9 +60,14 @@ class LIVACanvasView @JvmOverloads constructor(
 
     // Debug
     var showDebugInfo = false
+    /** Enable verbose per-frame logging for flicker diagnosis. Use with logcat tag "LIVACanvasView". */
+    var diagnosticMode = false
     private var frameCount = 0
     private var lastFpsTime = System.currentTimeMillis()
     private var currentFps = 0.0
+    private var renderFrameCount = 0  // Total render calls for diagnostic logging
+    private var nullOverlayCount = 0  // Consecutive null overlay frames
+    private var recycledCount = 0     // Consecutive recycled bitmap draws
 
     private val debugPaint = Paint().apply {
         color = Color.WHITE
@@ -116,7 +126,8 @@ class LIVACanvasView @JvmOverloads constructor(
 
         val widthRatio = viewWidth / imageWidth
         val heightRatio = viewHeight / imageHeight
-        contentScale = minOf(widthRatio, heightRatio)
+        // aspect-fill (matches iOS): avatar fills the view, may crop edges
+        contentScale = maxOf(widthRatio, heightRatio)
 
         contentWidth = imageWidth * contentScale
         contentHeight = imageHeight * contentScale
@@ -188,13 +199,18 @@ class LIVACanvasView @JvmOverloads constructor(
         // Clear canvas
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
 
+        // Snapshot bitmap references to locals — prevents race with LruCache eviction
+        val base = baseFrame
+        val overlay = overlayFrame
+        val pos = overlayPosition
+
         // Update layout if base frame changed
-        if (baseFrame != null && contentWidth == 0f) {
+        if (base != null && contentWidth == 0f) {
             updateContentLayout()
         }
 
-        // Draw base frame
-        baseFrame?.let { base ->
+        // Draw base frame (guard against recycled bitmaps from cache eviction)
+        if (base != null && !base.isRecycled) {
             val destRect = RectF(
                 contentOffsetX,
                 contentOffsetY,
@@ -205,9 +221,9 @@ class LIVACanvasView @JvmOverloads constructor(
         }
 
         // Draw overlay frame with feathered edges at position
-        overlayFrame?.let { overlay ->
-            val scaledX = contentOffsetX + overlayPosition.x * contentScale
-            val scaledY = contentOffsetY + overlayPosition.y * contentScale
+        if (overlay != null && !overlay.isRecycled) {
+            val scaledX = contentOffsetX + pos.x * contentScale
+            val scaledY = contentOffsetY + pos.y * contentScale
             val overlayWidth = overlay.width * contentScale
             val overlayHeight = overlay.height * contentScale
 
@@ -218,9 +234,44 @@ class LIVACanvasView @JvmOverloads constructor(
                 scaledY + overlayHeight
             )
 
-            // Apply feathered overlay
+            // Apply feathered overlay (double-buffered, safe)
             val feathered = createFeatheredOverlay(overlay)
-            canvas.drawBitmap(feathered, null, destRect, paint)
+            if (!feathered.isRecycled) {
+                canvas.drawBitmap(feathered, null, destRect, paint)
+            }
+        }
+
+        // Diagnostic logging for flicker analysis
+        if (diagnosticMode) {
+            renderFrameCount++
+            val mode = animationEngine?.mode?.name ?: "?"
+            if (mode == "TALKING") {
+                val baseOk = base != null && !base.isRecycled
+                val overlayOk = overlay != null && !overlay.isRecycled
+                val baseInfo = if (base == null) "null" else if (base.isRecycled) "RECYCLED" else "${base.width}x${base.height}"
+                val overlayInfo = if (overlay == null) "null" else if (overlay.isRecycled) "RECYCLED" else "${overlay.width}x${overlay.height}"
+
+                if (!overlayOk) {
+                    nullOverlayCount++
+                    if (nullOverlayCount <= 3 || nullOverlayCount % 10 == 0) {
+                        Log.w("LIVACanvasView", "FLICKER #$renderFrameCount: overlay=$overlayInfo, base=$baseInfo, consecutive=$nullOverlayCount")
+                    }
+                } else {
+                    if (nullOverlayCount > 0) {
+                        Log.d("LIVACanvasView", "FLICKER-END #$renderFrameCount: overlay resumed after $nullOverlayCount null frames")
+                        nullOverlayCount = 0
+                    }
+                }
+
+                if (base != null && base.isRecycled) {
+                    recycledCount++
+                    Log.e("LIVACanvasView", "RECYCLED-BASE #$renderFrameCount: base bitmap recycled during draw!")
+                }
+                if (overlay != null && overlay.isRecycled) {
+                    recycledCount++
+                    Log.e("LIVACanvasView", "RECYCLED-OVERLAY #$renderFrameCount: overlay bitmap recycled during draw!")
+                }
+            }
         }
 
         // Draw debug info
@@ -268,24 +319,37 @@ class LIVACanvasView @JvmOverloads constructor(
 
     /**
      * Creates a feathered overlay bitmap with radial gradient mask.
+     * Uses double-buffering: while the SurfaceHolder draws one buffer,
+     * we write to the other — prevents flicker from eraseColor race.
      */
     private fun createFeatheredOverlay(overlay: Bitmap): Bitmap {
         val width = overlay.width
         val height = overlay.height
 
-        // Ensure we have a properly sized offscreen bitmap
-        if (featheredOverlayBitmap == null ||
-            featheredOverlayBitmap?.width != width ||
-            featheredOverlayBitmap?.height != height) {
-            featheredOverlayBitmap?.recycle()
-            featheredOverlayBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            featheredOverlayCanvas = Canvas(featheredOverlayBitmap!!)
+        // Toggle buffer each frame
+        useBufferA = !useBufferA
+
+        // Get the write buffer (not the one being displayed)
+        var bitmap = if (useBufferA) featheredBitmapA else featheredBitmapB
+        var offCanvas = if (useBufferA) featheredCanvasA else featheredCanvasB
+
+        // Ensure write buffer is properly sized
+        if (bitmap == null || bitmap.width != width || bitmap.height != height) {
+            bitmap?.recycle()
+            bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            offCanvas = Canvas(bitmap)
+            if (useBufferA) {
+                featheredBitmapA = bitmap
+                featheredCanvasA = offCanvas
+            } else {
+                featheredBitmapB = bitmap
+                featheredCanvasB = offCanvas
+            }
         }
 
-        val canvas = featheredOverlayCanvas ?: return overlay
-        val bitmap = featheredOverlayBitmap ?: return overlay
+        val canvas = offCanvas ?: return overlay
 
-        // Clear previous content
+        // Clear previous content (safe — this buffer is NOT being displayed)
         bitmap.eraseColor(Color.TRANSPARENT)
 
         // Draw the overlay image

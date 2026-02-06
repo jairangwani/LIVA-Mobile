@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
 import kotlinx.coroutines.*
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -97,16 +98,35 @@ class BaseFrameManager(private val context: Context) {
 
     /**
      * Register an animation with its total frame count.
+     * If already registered with a different frame count (e.g., single-frame preview
+     * upgraded to full animation), re-registers preserving existing frames.
      */
     @Synchronized
     fun registerAnimation(name: String, totalFrames: Int) {
-        if (!animations.containsKey(name)) {
+        val existing = animations[name]
+        if (existing == null) {
             animations[name] = BaseAnimation(
                 name = name,
                 frames = arrayOfNulls(totalFrames),
                 totalFrames = totalFrames
             )
             loadingAnimations.add(name)
+        } else if (existing.totalFrames != totalFrames) {
+            // Re-register with correct frame count, preserving existing frames
+            val newFrames = arrayOfNulls<Bitmap>(totalFrames)
+            for (i in existing.frames.indices) {
+                if (i < totalFrames) {
+                    newFrames[i] = existing.frames[i]
+                }
+            }
+            animations[name] = BaseAnimation(
+                name = name,
+                frames = newFrames,
+                totalFrames = totalFrames
+            )
+            loadingAnimations.add(name)
+            loadedAnimations.remove(name)
+            Log.d(TAG, "Re-registered $name: ${existing.totalFrames} -> $totalFrames frames")
         }
     }
 
@@ -151,6 +171,15 @@ class BaseFrameManager(private val context: Context) {
             // Cache to disk
             cacheAnimationToDisk(animationName)
         }
+    }
+
+    /**
+     * Set a frame directly without triggering callbacks, progress, or disk caching.
+     * Used for instant display path to avoid side effects.
+     */
+    fun setFrameDirect(animationName: String, frameIndex: Int, bitmap: Bitmap) {
+        val animation = animations[animationName] ?: return
+        animation.setFrame(bitmap, frameIndex)
     }
 
     /**
@@ -301,6 +330,74 @@ class BaseFrameManager(private val context: Context) {
 
     // MARK: - Disk Cache
 
+    private val versionsFile: File?
+        get() = cacheDirectory?.let { File(it, "manifest_versions.json") }
+
+    /**
+     * Check if an animation exists in the disk cache (has frame_0000.png).
+     */
+    fun hasCachedAnimation(animationName: String): Boolean {
+        val cacheDir = cacheDirectory ?: return false
+        val frame0 = File(File(cacheDir, animationName), "frame_0000.png")
+        return frame0.exists()
+    }
+
+    /**
+     * Load a single frame from disk cache without loading the entire animation.
+     * Used for instant display of idle frame 0 on startup.
+     */
+    fun loadSingleFrame(animationName: String, frameIndex: Int): Bitmap? {
+        val cacheDir = cacheDirectory ?: return null
+        val fileName = String.format("frame_%04d.png", frameIndex)
+        val file = File(File(cacheDir, animationName), fileName)
+        if (!file.exists()) return null
+        return try {
+            BitmapFactory.decodeFile(file.absolutePath)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading single frame: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Save the manifest version for an animation (for cache validation on next startup).
+     */
+    @Synchronized
+    fun saveVersion(animationName: String, version: String) {
+        val file = versionsFile ?: return
+        try {
+            val json = if (file.exists()) {
+                JSONObject(file.readText())
+            } else {
+                JSONObject()
+            }
+            json.put(animationName, version)
+            file.writeText(json.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving version for $animationName: ${e.message}")
+        }
+    }
+
+    /**
+     * Get the cached manifest version for an animation.
+     * Returns null if no version stored.
+     */
+    @Synchronized
+    fun getCachedVersion(animationName: String): String? {
+        val file = versionsFile ?: return null
+        return try {
+            if (file.exists()) {
+                val json = JSONObject(file.readText())
+                if (json.has(animationName)) json.getString(animationName) else null
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading cached version for $animationName: ${e.message}")
+            null
+        }
+    }
+
     private fun cacheAnimationToDisk(name: String) {
         val cacheDir = cacheDirectory ?: return
         val animation = animations[name] ?: return
@@ -328,7 +425,9 @@ class BaseFrameManager(private val context: Context) {
     }
 
     /**
-     * Load animation from disk cache.
+     * Load animation from disk cache (bulk path).
+     * Populates frames directly without per-frame callbacks, progress notifications,
+     * or re-caching to disk. Much faster than addFrame() loop.
      */
     fun loadFromCache(animationName: String): Boolean {
         val cacheDir = cacheDirectory ?: return false
@@ -344,21 +443,61 @@ class BaseFrameManager(private val context: Context) {
 
         if (frameFiles.isEmpty()) return false
 
-        // Register and load
-        registerAnimation(animationName, frameFiles.size)
+        val totalFrames = frameFiles.size
+        val frames = arrayOfNulls<Bitmap>(totalFrames)
+        var loadedCount = 0
 
         frameFiles.forEachIndexed { index, file ->
             try {
                 val bitmap = BitmapFactory.decodeFile(file.absolutePath)
-                bitmap?.let {
-                    addFrame(it, animationName, index)
+                if (bitmap != null) {
+                    frames[index] = bitmap
+                    loadedCount++
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error loading frame from cache: ${e.message}")
+                Log.e(TAG, "Error loading frame $index from cache: ${e.message}")
             }
         }
 
-        return isAnimationLoaded(animationName)
+        if (loadedCount == 0) return false
+
+        // Bulk register: directly set the animation with all frames at once
+        // This avoids per-frame callbacks, progress notifications, and re-caching
+        synchronized(this) {
+            val existing = animations[animationName]
+            if (existing != null && existing.totalFrames == totalFrames) {
+                // Preserve any existing frames (e.g., frame 0 from instant display)
+                // but replace with disk-loaded versions
+                for (i in frames.indices) {
+                    if (frames[i] != null) {
+                        existing.frames[i] = frames[i]
+                    }
+                }
+                if (loadedCount == totalFrames) {
+                    existing.isComplete = true
+                    loadingAnimations.remove(animationName)
+                    loadedAnimations.add(animationName)
+                }
+            } else {
+                // New registration or different frame count
+                val animation = BaseAnimation(
+                    name = animationName,
+                    frames = frames,
+                    totalFrames = totalFrames,
+                    isComplete = loadedCount == totalFrames
+                )
+                animations[animationName] = animation
+                if (loadedCount == totalFrames) {
+                    loadingAnimations.remove(animationName)
+                    loadedAnimations.add(animationName)
+                } else {
+                    loadingAnimations.add(animationName)
+                }
+            }
+        }
+
+        Log.d(TAG, "Bulk loaded $animationName from cache: $loadedCount/$totalFrames frames")
+        return loadedCount == totalFrames
     }
 
     /**
@@ -367,6 +506,7 @@ class BaseFrameManager(private val context: Context) {
     fun clearCache() {
         cacheDirectory?.deleteRecursively()
         cacheDirectory?.mkdirs()
+        versionsFile?.delete()
 
         synchronized(this) {
             animations.clear()

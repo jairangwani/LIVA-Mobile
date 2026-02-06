@@ -52,10 +52,11 @@ data class QueuedAnimationChunk(
 internal class AnimationEngine {
 
     companion object {
-        // Reduced from 30 to 5: decode-gated advancement in getNextFrame() now prevents
-        // the frame counter from advancing past undecoded frames, so a large buffer isn't
-        // needed. Small buffer gives faster startup while decode-gate provides safety net.
-        const val MIN_FRAMES_BEFORE_START = 5
+        // Reduced from 30 to 2: decode-gated advancement in getNextFrame() prevents the
+        // frame counter from advancing past undecoded frames, so a large buffer isn't needed.
+        // 2-frame buffer gives near-instant section starts while decode-gate provides safety.
+        // Lower value = shorter inter-chunk gaps = smoother transitions between chunks.
+        const val MIN_FRAMES_BEFORE_START = 2
         const val TARGET_FPS = 30.0
         const val FRAME_INTERVAL_MS = 1000.0 / TARGET_FPS  // 33.33ms
     }
@@ -137,6 +138,15 @@ internal class AnimationEngine {
     // All chunks complete callback (like iOS animationEngineDidFinishAllChunks)
     var onAllChunksComplete: (() -> Unit)? = null
 
+    // Audio duration query — returns pre-decoded PCM duration in ms for a given chunk.
+    // Wired by LIVAClient to AudioPlayer.getChunkDurationMs().
+    var getAudioDurationForChunk: ((Int) -> Long)? = null
+
+    // Audio elapsed query — returns ms since AudioTrack started playing this chunk.
+    // More accurate than wall-clock from trigger time (accounts for pre-decode delay).
+    // Wired by LIVAClient to AudioPlayer.getChunkElapsedMs().
+    var getAudioElapsedForChunk: ((Int) -> Long)? = null
+
     // MARK: - Message Lifecycle State
 
     // Tracks whether a message is actively being processed (audio chunks arriving)
@@ -157,6 +167,19 @@ internal class AnimationEngine {
 
     // Track which chunks have already started audio (prevent duplicate playback)
     private val audioStartedForChunk = mutableSetOf<Int>()
+
+    // Gap tracking between chunks
+    private var lastSectionCompleteTime: Long = 0
+    private var skipDrawCount: Int = 0
+    private var messageStartTime: Long = 0
+    private var totalChunksPlayed: Int = 0
+
+    // SKIP_DRAW timeout (matches iOS maxConsecutiveSkipDraws = 15)
+    // After 15 consecutive skips for the same frame (~500ms at 30fps),
+    // force-advance past it to prevent infinite freeze on stuck frames.
+    private val MAX_CONSECUTIVE_SKIP_DRAWS = 15
+    private var consecutiveSkipDrawCount = 0
+    private var lastSkipDrawFrame = -1
 
     // MARK: - Configuration
 
@@ -220,7 +243,10 @@ internal class AnimationEngine {
         messageActive = true
         audioEndReceived = false
         nextExpectedChunkIndex = 0
-        Log.d(TAG, "📨 Message started - idle transitions blocked until audio_end")
+        messageStartTime = SystemClock.elapsedRealtime()
+        totalChunksPlayed = 0
+        lastSectionCompleteTime = 0
+        Log.d(TAG, "📨 Message started")
     }
 
     /**
@@ -322,7 +348,9 @@ internal class AnimationEngine {
         // Switch to talking mode
         setMode(AnimationMode.TALKING)
 
-        Log.d(TAG, "▶️ Started overlay section: chunk=${nextSection.chunkIndex}, frames=${nextSection.frames.size}")
+        val gapMs = if (lastSectionCompleteTime > 0) SystemClock.elapsedRealtime() - lastSectionCompleteTime else 0
+        Log.d(TAG, "▶️ Started overlay section: chunk=${nextSection.chunkIndex}, frames=${nextSection.frames.size}, " +
+                "baseAnim=${nextSection.animationName}, gapFromPrev=${gapMs}ms")
     }
 
     /**
@@ -376,41 +404,110 @@ internal class AnimationEngine {
             return previousRenderFrame ?: getIdleFrame(currentTime)
         }
 
-        // Time-based frame advancement
-        val deltaTime = currentTime - lastAdvanceTime
-        lastAdvanceTime = currentTime
-        frameAccumulator += deltaTime
+        // Trigger audio BEFORE frame advancement — if we wait until after,
+        // the advancement loop may increment past frame 0 and the check never fires
+        if (!section.audioStarted) {
+            section.audioStarted = true
+            triggerAudioForChunk(section.chunkIndex)
+        }
 
-        // Advance frames based on accumulated time
-        while (frameAccumulator >= FRAME_INTERVAL_MS && !section.done) {
-            frameAccumulator -= FRAME_INTERVAL_MS
+        // AUDIO-PACED FRAME ADVANCEMENT
+        // Instead of advancing one frame every 33ms (time-based), advance to the frame
+        // that matches the current audio playback position. This ensures overlay and audio
+        // stay in sync even when decode-gate slows frame rendering (e.g., emulator decode
+        // at 50ms/frame stretching 27 frames from 900ms to 1400ms while audio plays at real speed).
 
-            // Check jitter fix - hold last frame if next chunk not ready
-            if (shouldHoldLastFrame()) {
-                frameAccumulator = 0.0
-                break
+        // Poll for audio duration — pre-decode may not be complete at trigger time (emulator
+        // can take 600ms-3000ms for MP3→PCM). Re-query each render cycle until available.
+        if (section.audioDurationMs == 0L && section.audioTriggerTime != null) {
+            val freshDuration = getAudioDurationForChunk?.invoke(section.chunkIndex) ?: 0L
+            if (freshDuration > 0) {
+                section.audioDurationMs = freshDuration
+                Log.d(TAG, "🎵 Late audio duration for chunk ${section.chunkIndex}: ${freshDuration}ms")
             }
+        }
 
-            // STREAMING DECODE: Check if next frame's overlay is decoded before advancing.
-            // Without this, frame counter races ahead of background decoding and the
-            // section completes before frames actually render (all skip-drawn).
-            val nextIdx = section.currentDrawingFrame + 1
-            if (nextIdx < section.frames.size) {
-                val nextKey = section.frames[nextIdx].overlayId
-                if (nextKey != null && frameDecoder?.isImageDecoded(nextKey) == false) {
-                    // Next frame not yet decoded - hold current frame, retry next render cycle
-                    frameAccumulator = 0.0
-                    break
+        val audioDuration = section.audioDurationMs
+        // Query actual AudioPlayer elapsed (0 until AudioTrack starts writing PCM)
+        val playerElapsed = if (audioDuration > 0) {
+            getAudioElapsedForChunk?.invoke(section.chunkIndex) ?: 0L
+        } else 0L
+
+        if (playerElapsed > 0 && audioDuration > 0 && !section.done) {
+            // AUDIO-PACED MODE: AudioTrack is actively playing — sync frames to audio position.
+            // This is the primary sync path. playerElapsed is measured from the actual moment
+            // AudioTrack starts writing PCM, so it's accurate regardless of pre-decode delay.
+            val audioProgress = (playerElapsed.toDouble() / audioDuration).coerceIn(0.0, 1.0)
+            val targetFrame = (audioProgress * section.totalFrames).toInt()
+                .coerceIn(0, section.totalFrames - 1)
+
+            if (targetFrame > section.currentDrawingFrame) {
+                // Audio is ahead — advance toward target frame.
+                // Find highest decoded frame up to targetFrame (respects decode-gate).
+                var bestFrame = section.currentDrawingFrame
+                for (i in (section.currentDrawingFrame + 1)..targetFrame) {
+                    val key = section.frames.getOrNull(i)?.overlayId
+                    if (key == null || frameDecoder?.isImageDecoded(key) != false) {
+                        bestFrame = i
+                    } else {
+                        break
+                    }
+                }
+
+                if (bestFrame > section.currentDrawingFrame) {
+                    val skipped = bestFrame - section.currentDrawingFrame - 1
+                    if (skipped > 0) {
+                        Log.d(TAG, "⏩ Audio-paced skip: ${section.currentDrawingFrame}→$bestFrame (target=$targetFrame, skipped=$skipped, audio=${playerElapsed}ms/${audioDuration}ms)")
+                    }
+                    section.currentDrawingFrame = bestFrame
                 }
             }
+            // targetFrame <= currentDrawingFrame: hold (time-based ran ahead of audio)
 
-            section.currentDrawingFrame++
-
-            // Check if section complete
-            if (section.currentDrawingFrame >= section.frames.size) {
+            // Section complete when audio finishes playing
+            if (playerElapsed >= audioDuration) {
+                section.currentDrawingFrame = section.totalFrames - 1
                 section.done = true
                 onSectionComplete(section)
-                break
+            }
+        } else if (!section.done) {
+            if (audioDuration > 0) {
+                // Audio duration known but AudioTrack not yet started (playerElapsed == 0).
+                // HOLD at current frame — don't advance until audio plays so overlay and audio
+                // start together in sync. On real devices this hold is <50ms (imperceptible).
+                // Audio-paced path will take over when playerElapsed > 0.
+            } else {
+                // TIME-BASED FALLBACK: No audio info at all (edge case / pre-decode not done).
+                // Advance at 30fps with decode-gate and jitter hold.
+                val deltaTime = currentTime - lastAdvanceTime
+                lastAdvanceTime = currentTime
+                frameAccumulator += deltaTime
+
+                if (frameAccumulator >= FRAME_INTERVAL_MS) {
+                    if (frameAccumulator > FRAME_INTERVAL_MS * 2) {
+                        frameAccumulator = FRAME_INTERVAL_MS * 2
+                    }
+                    frameAccumulator -= FRAME_INTERVAL_MS
+
+                    if (shouldHoldLastFrame()) {
+                        frameAccumulator = 0.0
+                    } else {
+                        val nextIdx = section.currentDrawingFrame + 1
+                        if (nextIdx < section.frames.size) {
+                            val nextKey = section.frames[nextIdx].overlayId
+                            if (nextKey != null && frameDecoder?.isImageDecoded(nextKey) == false) {
+                                frameAccumulator = 0.0  // decode-gate
+                            } else {
+                                section.currentDrawingFrame++
+                            }
+                        }
+
+                        if (section.currentDrawingFrame >= section.frames.size) {
+                            section.done = true
+                            onSectionComplete(section)
+                        }
+                    }
+                }
             }
         }
 
@@ -423,26 +520,75 @@ internal class AnimationEngine {
         }
 
         // SKIP-DRAW-ON-WAIT: If overlay not decoded, hold previous frame
+        // With SKIP_DRAW timeout (matches iOS maxConsecutiveSkipDraws):
+        // After MAX_CONSECUTIVE_SKIP_DRAWS for the same frame, force-advance past it.
         val cacheKey = currentFrame.overlayId
         if (cacheKey != null && frameDecoder?.isImageDecoded(cacheKey) == false) {
-            Log.d(TAG, "⏸️ Skip-draw: overlay not decoded, key=$cacheKey")
-            return previousRenderFrame ?: getIdleFrame(currentTime)
+            // Track consecutive skips for same frame
+            if (section.currentDrawingFrame == lastSkipDrawFrame) {
+                consecutiveSkipDrawCount++
+            } else {
+                consecutiveSkipDrawCount = 1
+                lastSkipDrawFrame = section.currentDrawingFrame
+            }
+
+            if (consecutiveSkipDrawCount >= MAX_CONSECUTIVE_SKIP_DRAWS) {
+                // TIMEOUT: Force-advance past stuck frame to prevent infinite freeze
+                Log.w(TAG, "⚠️ SKIP_DRAW TIMEOUT: Force-advancing past stuck frame chunk=${section.chunkIndex} seq=${section.currentDrawingFrame} key=$cacheKey after $MAX_CONSECUTIVE_SKIP_DRAWS consecutive skips")
+                consecutiveSkipDrawCount = 0
+                lastSkipDrawFrame = -1
+                // Don't return — fall through to render (with possibly missing overlay)
+            } else {
+                skipDrawCount++
+                if (skipDrawCount == 1 || skipDrawCount % 10 == 0) {
+                    Log.d(TAG, "⏸️ Skip-draw #$skipDrawCount ($consecutiveSkipDrawCount/$MAX_CONSECUTIVE_SKIP_DRAWS): overlay not decoded, chunk=${section.chunkIndex}, frame=${section.currentDrawingFrame}, key=$cacheKey")
+                }
+                return previousRenderFrame ?: getIdleFrame(currentTime)
+            }
         }
+        if (skipDrawCount > 0) {
+            Log.d(TAG, "⏸️ Skip-draw ended after $skipDrawCount skips, resuming chunk=${section.chunkIndex} frame=${section.currentDrawingFrame}")
+            skipDrawCount = 0
+        }
+        // Reset skip-draw timeout on successful render
+        consecutiveSkipDrawCount = 0
+        lastSkipDrawFrame = -1
 
         // Get base frame synced with overlay
         val baseImage = getBaseFrameForOverlay(currentFrame)
 
-        // Trigger audio on first frame
-        if (section.currentDrawingFrame == 0 && !section.audioStarted) {
-            section.audioStarted = true
-            triggerAudioForChunk(section.chunkIndex)
+        // Audio already triggered before frame advancement (see above)
+
+        // Build render frame — fetch FRESH bitmap from FrameDecoder cache.
+        // The DecodedFrame.image may be a 1x1 placeholder if the frame wasn't decoded
+        // when processChunkReady() built the OverlaySection. The actual bitmap is
+        // decoded asynchronously and stored in the FrameDecoder cache (HashMap, no eviction).
+        val overlayBitmap = currentFrame.overlayId?.let { key ->
+            frameDecoder?.getImage(key)
+        } ?: currentFrame.image
+        val overlayOk = !overlayBitmap.isRecycled
+        val baseOk = baseImage != null && !baseImage.isRecycled
+
+        if (!overlayOk) {
+            Log.e(TAG, "RECYCLED overlay at chunk=${section.chunkIndex} frame=${section.currentDrawingFrame} key=${currentFrame.overlayId}")
+            return previousRenderFrame ?: getIdleFrame(currentTime)
+        }
+        if (!baseOk) {
+            Log.e(TAG, "RECYCLED/null base at chunk=${section.chunkIndex} frame=${section.currentDrawingFrame} anim=${currentFrame.animationName}")
         }
 
-        // Build render frame
+        // Use section-level zoneTopLeft for overlay position (matches iOS and web).
+        // Per-frame coordinates are always (0,0) because backend deletes them
+        // (stream_handler.py removes per-frame 'coordinates' field, only sends
+        // chunk-level zone_top_left in receive_audio metadata).
+        val sectionPos = currentOverlaySection?.let {
+            PointF(it.zoneTopLeft.first.toFloat(), it.zoneTopLeft.second.toFloat())
+        } ?: PointF(0f, 0f)
+
         val renderFrame = RenderFrame(
             baseImage = baseImage,
-            overlayImage = currentFrame.image,
-            overlayPosition = PointF(currentFrame.coordinates.left, currentFrame.coordinates.top),
+            overlayImage = overlayBitmap,
+            overlayPosition = sectionPos,
             timestamp = currentTime
         )
 
@@ -482,9 +628,22 @@ internal class AnimationEngine {
      * Handle overlay section completion.
      */
     private fun onSectionComplete(section: OverlaySection) {
-        Log.d(TAG, "✅ Section complete: chunk=${section.chunkIndex}")
+        val elapsed = SystemClock.elapsedRealtime() - (section.startTime ?: SystemClock.elapsedRealtime())
+        val renderedFrames = section.currentDrawingFrame + 1
+        val actualFps = if (elapsed > 0) (renderedFrames * 1000.0 / elapsed) else 0.0
+        val audioInfo = if (section.audioDurationMs > 0) "audioDur=${section.audioDurationMs}ms" else "no-audio-pacing"
+        Log.d(TAG, "✅ Section complete: chunk=${section.chunkIndex}, " +
+                "rendered=$renderedFrames/${section.frames.size}, elapsed=${elapsed}ms, fps=${String.format("%.1f", actualFps)}, " +
+                "$audioInfo, baseAnim=${section.animationName}")
+        lastSectionCompleteTime = SystemClock.elapsedRealtime()
+        totalChunksPlayed++
         nextExpectedChunkIndex = section.chunkIndex + 1
         onChunkComplete?.invoke(section.chunkIndex)
+
+        // Clean up audio data for completed chunk
+        audioChunkLock.withLock {
+            pendingAudioChunks.remove(section.chunkIndex)
+        }
 
         // Try to start next section
         val hasNext = overlayQueueLock.withLock { overlayQueue.isNotEmpty() }
@@ -501,7 +660,8 @@ internal class AnimationEngine {
             // and can immediately start next section when it arrives
         } else {
             // All chunks truly complete (audio_end received or no active message)
-            Log.d(TAG, "🎉 All overlay chunks complete - transitioning to idle")
+            val totalMs = SystemClock.elapsedRealtime() - messageStartTime
+            Log.d(TAG, "🎉 Message complete: ${totalChunksPlayed} chunks in ${totalMs}ms (${String.format("%.1f", totalMs / 1000.0)}s)")
             currentOverlaySection = null
             messageActive = false
             transitionToIdle()
@@ -524,8 +684,20 @@ internal class AnimationEngine {
 
         if (audioData != null) {
             audioStartedForChunk.add(chunkIndex)
+
+            // Record audio timing for audio-paced frame advancement
+            val audioDurationMs = getAudioDurationForChunk?.invoke(chunkIndex) ?: 0L
+            currentOverlaySection?.let { section ->
+                section.audioTriggerTime = SystemClock.elapsedRealtime()
+                section.audioDurationMs = audioDurationMs
+            }
+
+            val overlayDecoded = currentOverlaySection?.let { section ->
+                val frame = section.frames.getOrNull(0)
+                frame?.overlayId?.let { frameDecoder?.isImageDecoded(it) } ?: true
+            } ?: false
             onStartAudioForChunk?.invoke(chunkIndex, audioData)
-            Log.d(TAG, "🔊 Started audio for chunk $chunkIndex - IN SYNC with first overlay frame")
+            Log.d(TAG, "🔊 Audio triggered for chunk $chunkIndex (overlay_decoded=$overlayDecoded, mode=$mode, audioDuration=${audioDurationMs}ms)")
         }
     }
 
@@ -661,15 +833,16 @@ internal class AnimationEngine {
      */
     fun setMode(newMode: AnimationMode) {
         if (mode != newMode) {
+            val prevMode = mode
             mode = newMode
             onModeChange?.invoke(newMode)
-            Log.d(TAG, "Mode changed to: $newMode")
+            Log.d(TAG, "Mode: $prevMode → $newMode")
 
             // Reset FPS tracking when switching to TALKING
             if (newMode == AnimationMode.TALKING) {
                 fpsLastUpdateTime = SystemClock.elapsedRealtime()
                 animationFrameCount = 0
-                currentFPS = 30.0  // Start with target FPS
+                currentFPS = 0.0  // Will be calculated from actual frames
             }
         }
     }
@@ -728,6 +901,10 @@ internal class AnimationEngine {
         lastHeldFrame = null
         previousRenderFrame = null
         isPlaying = false
+
+        // Reset SKIP_DRAW timeout
+        consecutiveSkipDrawCount = 0
+        lastSkipDrawFrame = -1
 
         // Switch to idle
         baseFrameManager?.switchAnimation("idle_1_s_idle_1_e", 0)

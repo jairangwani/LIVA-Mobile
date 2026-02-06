@@ -117,6 +117,10 @@ class LIVAClient private constructor() {
     private var pendingConnect: Boolean = false
     private var isBackgroundLoadingStarted: Boolean = false
 
+    // Manifest data for cache version comparison
+    private var manifestAnimations: Map<String, ManifestAnimationInfo> = emptyMap()
+    private var manifestReceived: Boolean = false
+
     // MARK: - Public Methods
 
     /**
@@ -152,8 +156,8 @@ class LIVAClient private constructor() {
         setupAudioPlayerCallbacks()
         setupBaseFrameManagerCallbacks()
 
-        // Try to load base frames from cache
-        loadBaseFramesFromCache()
+        // Check cache existence (lightweight, no frame loading)
+        checkCacheExistence()
     }
 
     /**
@@ -163,6 +167,24 @@ class LIVAClient private constructor() {
     fun attachView(view: LIVACanvasView) {
         this.canvasView = view
         view.animationEngine = animationEngine
+        view.diagnosticMode = true  // Enable flicker diagnosis logging
+
+        // INSTANT DISPLAY: Load idle frame 0 from cache synchronously
+        // This gives the user something to see before the socket even connects.
+        if (baseFrameManager?.hasCachedAnimation("idle_1_s_idle_1_e") == true) {
+            val frame0 = baseFrameManager?.loadSingleFrame("idle_1_s_idle_1_e", 0)
+            if (frame0 != null) {
+                android.util.Log.d(TAG, "Instant display: loaded idle frame 0 from cache (${frame0.width}x${frame0.height})")
+                // Use registerAnimation + setFrame directly (not addFrame) to avoid
+                // triggering onFirstIdleFrameReady callback and disk re-caching
+                baseFrameManager?.registerAnimation("idle_1_s_idle_1_e", 1)
+                baseFrameManager?.setFrameDirect("idle_1_s_idle_1_e", 0, frame0)
+                animationEngine?.setBaseFrameManager(baseFrameManager)
+                canvasView?.setBaseFrameManager(baseFrameManager)
+                canvasView?.startRenderLoop()
+                isBaseFramesLoaded = true
+            }
+        }
     }
 
     /**
@@ -329,8 +351,24 @@ class LIVAClient private constructor() {
                 android.util.Log.w(TAG, "Configuration is null, cannot start session logging")
             }
 
-            // Request base animation frames from server (backend won't send until requested)
-            requestBaseAnimations()
+            // Request manifest for cache validation (replaces direct animation requests)
+            val agentId = configuration?.agentId
+            if (agentId != null) {
+                android.util.Log.d(TAG, "Requesting animations manifest for cache validation")
+                socketManager?.requestAnimationsManifest(agentId)
+
+                // Fallback: if manifest doesn't arrive in 5s, use old direct-request flow
+                scope.launch {
+                    kotlinx.coroutines.delay(5000)
+                    if (!manifestReceived) {
+                        android.util.Log.w(TAG, "Manifest timeout - falling back to direct animation request")
+                        requestBaseAnimations()
+                    }
+                }
+            } else {
+                // No agent ID - fall back to direct request
+                requestBaseAnimations()
+            }
         }
 
         socket.onDisconnect = { reason ->
@@ -380,6 +418,10 @@ class LIVAClient private constructor() {
         socket.onAnimationFramesComplete = { animationName ->
             handleAnimationFramesComplete(animationName)
         }
+
+        socket.onAnimationsManifest = { animations ->
+            handleAnimationsManifest(animations)
+        }
     }
 
     // MARK: - Event Handlers
@@ -403,6 +445,7 @@ class LIVAClient private constructor() {
 
             // Start new message lifecycle - blocks premature idle transitions
             animationEngine?.startNewMessage()
+            audioPlayer?.markMessageActive()
 
             // Log event
             SessionLogger.getInstance().logEvent("NEW_MESSAGE", mapOf(
@@ -423,7 +466,11 @@ class LIVAClient private constructor() {
         // AUDIO-VIDEO SYNC: Queue audio in animation engine (don't play immediately)
         // Audio will start when first overlay frame renders
         animationEngine?.queueAudioForChunk(audioChunk.chunkIndex, audioChunk.audioData)
-        android.util.Log.d(TAG, "Queued audio for chunk ${audioChunk.chunkIndex} - waiting for animation sync")
+
+        // Pre-decode MP3 → PCM immediately on decode thread (runs in background)
+        // By the time animation triggers playback, PCM will be ready — zero decode latency
+        audioPlayer?.preDecodeAudio(audioChunk.audioData, audioChunk.chunkIndex)
+        android.util.Log.d(TAG, "Queued audio for chunk ${audioChunk.chunkIndex} - pre-decoding + waiting for animation sync")
 
         // Store overlay position for this chunk
         audioChunk.animationMetadata?.let { metadata ->
@@ -576,6 +623,8 @@ class LIVAClient private constructor() {
         if (shouldDeliverAudioEnd) {
             android.util.Log.d(TAG, "📭 All pending chunks enqueued - delivering deferred audio_end")
             animationEngine?.markAudioEndReceived()
+            // Don't markMessageComplete here — audio may still be decoding/playing.
+            // AudioPlayer will be stopped by onAllChunksComplete when engine finishes.
         }
     }
 
@@ -619,6 +668,7 @@ class LIVAClient private constructor() {
         } else {
             android.util.Log.d(TAG, "📭 audio_end received - all chunks enqueued, marking end")
             animationEngine?.markAudioEndReceived()
+            // Don't markMessageComplete here — audio may still be decoding/playing.
         }
     }
 
@@ -639,6 +689,7 @@ class LIVAClient private constructor() {
         } else {
             android.util.Log.d(TAG, "📭 play_base_animation received - all chunks enqueued, marking end")
             animationEngine?.markAudioEndReceived()
+            // Don't markMessageComplete here — audio may still be decoding/playing.
         }
     }
 
@@ -664,19 +715,122 @@ class LIVAClient private constructor() {
     private fun handleAnimationFramesComplete(animationName: String) {
         android.util.Log.d("LIVAClient", "Animation complete: $animationName")
 
-        // STARTUP OPTIMIZATION: When idle completes, start background loading.
-        // Note: isBackgroundLoadingStarted prevents duplicate triggers even if idle
-        // was already cached (isBaseFramesLoaded=true from loadBaseFramesFromCache).
+        // Save manifest version for cache validation on next startup
+        val version = manifestAnimations[animationName]?.version
+        if (version != null) {
+            baseFrameManager?.saveVersion(animationName, version)
+        }
+
         if (animationName == "idle_1_s_idle_1_e") {
             if (!isBaseFramesLoaded) {
                 isBaseFramesLoaded = true
                 notifyIdleReady()
             }
 
-            // Always trigger background loading when idle finishes from server
-            // (isBackgroundLoadingStarted flag prevents duplicate requests)
-            android.util.Log.d(TAG, "🚀 STARTUP: Idle animation complete - starting background loading...")
-            loadRemainingAnimationsInBackground()
+            // If not using manifest flow, fall back to old background loading
+            if (!manifestReceived) {
+                android.util.Log.d(TAG, "STARTUP: Idle complete (no manifest) - starting background loading...")
+                loadRemainingAnimationsInBackground()
+            }
+        }
+    }
+
+    /**
+     * Handle animations manifest from backend.
+     * Compares manifest versions with cached versions and selectively loads from cache or server.
+     */
+    private fun handleAnimationsManifest(animations: Map<String, ManifestAnimationInfo>) {
+        manifestReceived = true
+        manifestAnimations = animations
+        isBackgroundLoadingStarted = true  // Prevent old background loading path
+
+        android.util.Log.d(TAG, "Received manifest: ${animations.size} animations")
+
+        // Build prioritized list
+        val animationNamesSet = animations.keys
+        val orderedAnimations = mutableListOf<String>()
+        for (name in ANIMATION_LOAD_ORDER) {
+            if (animationNamesSet.contains(name)) {
+                orderedAnimations.add(name)
+            }
+        }
+        // Add any extras from manifest not in ANIMATION_LOAD_ORDER
+        for (name in animations.keys.sorted()) {
+            if (!orderedAnimations.contains(name)) {
+                orderedAnimations.add(name)
+            }
+        }
+
+        // Categorize: cache-valid vs needs-download
+        val cacheValid = mutableListOf<String>()
+        val needsDownload = mutableListOf<String>()
+
+        for (name in orderedAnimations) {
+            val manifestInfo = animations[name] ?: continue
+            val cachedVersion = baseFrameManager?.getCachedVersion(name)
+            val hasCached = baseFrameManager?.hasCachedAnimation(name) == true
+
+            if (hasCached && cachedVersion == manifestInfo.version) {
+                cacheValid.add(name)
+            } else {
+                needsDownload.add(name)
+                if (hasCached && cachedVersion != manifestInfo.version) {
+                    android.util.Log.d(TAG, "Version mismatch for $name: cached=$cachedVersion, manifest=${manifestInfo.version}")
+                }
+            }
+        }
+
+        android.util.Log.d(TAG, "Cache validation: ${cacheValid.size} from cache, ${needsDownload.size} need download")
+
+        // Load cache-valid animations from disk and request stale/missing from server
+        scope.launch(Dispatchers.IO) {
+            val idleName = "idle_1_s_idle_1_e"
+
+            // Load idle first if in cache (highest priority)
+            if (cacheValid.contains(idleName)) {
+                android.util.Log.d(TAG, "Loading $idleName from cache...")
+                val success = baseFrameManager?.loadFromCache(idleName) ?: false
+                if (success) {
+                    withContext(Dispatchers.Main) {
+                        if (!isBaseFramesLoaded) {
+                            isBaseFramesLoaded = true
+                            notifyIdleReady()
+                        }
+                    }
+                    android.util.Log.d(TAG, "Loaded $idleName from cache")
+                } else {
+                    // Cache corrupted - download instead
+                    android.util.Log.w(TAG, "Cache load failed for $idleName, will download")
+                    needsDownload.add(0, idleName)
+                    cacheValid.remove(idleName)
+                }
+            }
+
+            // Load remaining cache-valid animations
+            for (name in cacheValid) {
+                if (name == idleName) continue
+                val success = baseFrameManager?.loadFromCache(name) ?: false
+                if (success) {
+                    android.util.Log.d(TAG, "Loaded $name from cache")
+                } else {
+                    android.util.Log.w(TAG, "Cache load failed for $name, will download")
+                    socketManager?.requestBaseAnimation(name)
+                }
+                delay(10) // Yield to avoid blocking
+            }
+
+            // Request stale/missing animations from server
+            if (needsDownload.isNotEmpty()) {
+                android.util.Log.d(TAG, "Requesting ${needsDownload.size} animations from server: $needsDownload")
+            }
+            for (name in needsDownload) {
+                socketManager?.requestBaseAnimation(name)
+                delay(50)
+            }
+
+            val cacheCount = cacheValid.size
+            val downloadCount = needsDownload.size
+            android.util.Log.d(TAG, "Startup: loaded $cacheCount from cache, requesting $downloadCount from server")
         }
     }
 
@@ -700,12 +854,13 @@ class LIVAClient private constructor() {
         }
     }
 
-    private fun loadBaseFramesFromCache() {
-        // Try to load from disk cache
+    private fun checkCacheExistence() {
+        // Lightweight check only - no frame loading.
+        // Actual loading happens after manifest validation in handleAnimationsManifest().
         for (animationName in ANIMATION_LOAD_ORDER) {
-            if (baseFrameManager?.loadFromCache(animationName) == true) {
+            if (baseFrameManager?.hasCachedAnimation(animationName) == true) {
                 if (animationName == "idle_1_s_idle_1_e") {
-                    isBaseFramesLoaded = true
+                    android.util.Log.d(TAG, "Cache check: idle animation found in cache")
                 }
             }
         }
@@ -747,7 +902,7 @@ class LIVAClient private constructor() {
         // All chunks complete - message fully played
         animationEngine?.onAllChunksComplete = {
             android.util.Log.d(TAG, "🏁 All chunks complete - message fully played")
-            audioPlayer?.stop()
+            audioPlayer?.markMessageComplete()  // Let playback loop exit naturally after current chunk
             if (state == LIVAState.Animating) {
                 state = LIVAState.Connected
             }
@@ -755,10 +910,16 @@ class LIVAClient private constructor() {
 
         // AUDIO-VIDEO SYNC: Trigger audio playback when first frame renders
         animationEngine?.onStartAudioForChunk = { chunkIndex, audioData ->
-            // Called by animation engine when first overlay frame is about to render
-            // This ensures audio starts in perfect sync with animation
             audioPlayer?.queueAudio(audioData, chunkIndex)
-            android.util.Log.d(TAG, "🔊 Playing audio for chunk $chunkIndex - synced with first overlay frame")
+            android.util.Log.d(TAG, "🔊 Queued audio to player for chunk $chunkIndex")
+        }
+
+        // AUDIO-PACED SYNC: Provide audio duration and elapsed time for frame pacing
+        animationEngine?.getAudioDurationForChunk = { chunkIndex ->
+            audioPlayer?.getChunkDurationMs(chunkIndex) ?: 0L
+        }
+        animationEngine?.getAudioElapsedForChunk = { chunkIndex ->
+            audioPlayer?.getChunkElapsedMs(chunkIndex) ?: 0L
         }
     }
 

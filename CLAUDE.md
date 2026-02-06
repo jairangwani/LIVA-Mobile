@@ -521,14 +521,14 @@ adb logcat -s "LIVAClient" "LIVASocketManager" "AnimationEngine" "SessionLogger"
 
 ### Android Socket.IO Library
 
-Uses Dyte's SocketIO-Kotlin library (NOT official Java client):
+Uses the official Socket.IO Java client v2.1.0:
 
 ```kotlin
-// build.gradle
-implementation("io.dyte:socketio-kotlin:1.0.8")
+// build.gradle.kts
+implementation("io.socket:socket.io-client:2.1.0")
 ```
 
-**Why Dyte library:** Official Java client uses Engine.IO v3, incompatible with backend's Engine.IO v4. Dyte library works correctly with Flask-SocketIO 5.x.
+**Note:** `io.socket:socket.io-client:2.1.0` supports Engine.IO v4 and works with Flask-SocketIO 5.x. The "websocket error" on emulator is a cold boot issue, NOT a protocol mismatch.
 
 ### Android Feature Parity with iOS
 
@@ -537,11 +537,15 @@ implementation("io.dyte:socketio-kotlin:1.0.8")
 | Session logging | LIVASessionLogger | SessionLogger.kt |
 | Async frame processing | Batched with yields | Batched with delay(0) |
 | Animation state machine | Mode enum | AnimationMode enum |
-| Buffer readiness (30 frames) | isBufferReady() | MIN_FRAMES_BEFORE_START=30 |
-| Skip-draw-on-wait | shouldSkipFrameAdvance | Skip-draw in getNextFrame |
-| Audio-video sync | Callback on first frame | triggerAudioForChunk callback |
+| Buffer readiness | isBufferReady() (30 frames) | isBufferReady() (MIN_FRAMES_BEFORE_START=2, decode-gate) |
+| Skip-draw-on-wait | shouldSkipFrameAdvance (timeout: 15) | Skip-draw in getNextFrame (MAX_CONSECUTIVE_SKIP_DRAWS=15) |
+| Audio-video sync | Callback on first frame | Audio-paced: playerElapsed-driven with time-based fallback |
 | Progressive loading | Idle first | Idle first |
 | Chunk synchronization | pendingBatchCount | pendingBatchCount |
+| Base frame disk cache | PNG in Caches dir | PNG in cacheDir/LIVABaseFrames |
+| Cache version tracking | None (re-downloads all) | manifest_versions.json (skip valid cache) |
+| Manifest validation | Requests manifest, downloads all | Requests manifest, only downloads stale/missing |
+| Instant display (frame 0) | Sync load in attachView | Sync load in attachView |
 
 ### Critical Instance ID Note
 

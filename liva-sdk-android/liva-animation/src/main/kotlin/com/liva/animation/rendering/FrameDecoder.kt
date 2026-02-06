@@ -4,39 +4,43 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.RectF
 import android.util.Base64
-import android.util.LruCache
 import com.liva.animation.models.DecodedFrame
 import com.liva.animation.models.FrameBatch
 import com.liva.animation.models.FrameData
 import kotlinx.coroutines.*
 
 /**
- * High-performance frame decoder for base64 images.
+ * Content-addressed overlay image decoder and cache.
+ *
+ * Architecture: Simple HashMap (not LRU). Overlay images are keyed by content
+ * (overlay_id like "talking_1_s_talking_1_e/42/J1_X2_M0.webp"), so the same
+ * lip-sync sprite is stored once regardless of how many chunks use it.
+ *
+ * With J(6)×X(6)×M(6) = 216 max unique sprites per animation type, and typically
+ * 2-3 animation types per message, the total unique count is bounded at ~100-200
+ * entries (~36-72MB). No eviction needed during playback. clearAll() on new message.
+ *
+ * No chunk tracking, no LRU eviction, no shared-key protection needed.
  */
 internal class FrameDecoder {
-
-    companion object {
-        private const val CACHE_SIZE_MB = 50
-    }
 
     // MARK: - Properties
 
     private val decodeScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    // LRU cache for decoded bitmaps
-    private val imageCache: LruCache<String, Bitmap> = object : LruCache<String, Bitmap>(
-        CACHE_SIZE_MB * 1024 * 1024
-    ) {
-        override fun sizeOf(key: String, bitmap: Bitmap): Int {
-            return bitmap.byteCount
-        }
-    }
+    // Content-addressed cache: overlay_id → decoded Bitmap.
+    // HashMap (not LRU) because all entries are needed until message ends.
+    // Bounded by unique overlay count (~200 max), not frame count.
+    private val imageCache = HashMap<String, Bitmap>()
+    private val imageCacheLock = Any()
 
-    // Track which images are fully decoded (not just cached)
+    // Track which images are fully decoded and ready to render.
+    // Separate from imageCache because decode is async — an entry may be
+    // in-flight (coroutine running) but not yet in imageCache.
     private val decodedKeys = mutableSetOf<String>()
     private val decodedKeysLock = Any()
 
-    // Bitmap options for reuse
+    // Bitmap options for decode
     private val options = BitmapFactory.Options().apply {
         inMutable = true
         inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -48,12 +52,12 @@ internal class FrameDecoder {
      * Decode a single frame synchronously.
      */
     fun decodeSync(base64String: String): Bitmap? {
-        // Check cache
         val cacheKey = base64String.take(100)
-        imageCache.get(cacheKey)?.let { return it }
+        synchronized(imageCacheLock) {
+            imageCache[cacheKey]?.let { return it }
+        }
 
         return try {
-            // Remove data URL prefix if present
             val base64 = if (base64String.contains("base64,")) {
                 base64String.substringAfter("base64,")
             } else {
@@ -63,8 +67,9 @@ internal class FrameDecoder {
             val bytes = Base64.decode(base64, Base64.DEFAULT)
             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 
-            // Cache the result
-            bitmap?.let { imageCache.put(cacheKey, it) }
+            bitmap?.let {
+                synchronized(imageCacheLock) { imageCache[cacheKey] = it }
+            }
 
             bitmap
         } catch (e: Exception) {
@@ -81,7 +86,6 @@ internal class FrameDecoder {
 
     /**
      * Decode a frame with content-based cache key.
-     * Uses overlay_id from backend if available, otherwise generates from animation/sprite/filename.
      */
     suspend fun decodeWithContentKey(
         base64String: String,
@@ -90,19 +94,18 @@ internal class FrameDecoder {
         spriteNumber: Int?,
         sheetFilename: String?
     ): Pair<String, Bitmap?> = withContext(Dispatchers.Default) {
-        // Generate content-based cache key
         val cacheKey = if (!overlayId.isNullOrEmpty()) {
-            overlayId  // Prefer backend-provided overlay_id
+            overlayId
         } else if (animationName != null && spriteNumber != null && sheetFilename != null) {
-            // Fallback: generate content key
             "$animationName/$spriteNumber/$sheetFilename"
         } else {
-            // Last resort: use first 100 chars (old behavior)
             base64String.take(100)
         }
 
         // Check cache
-        imageCache.get(cacheKey)?.let { return@withContext cacheKey to it }
+        synchronized(imageCacheLock) {
+            imageCache[cacheKey]?.let { return@withContext cacheKey to it }
+        }
 
         // Decode
         val bitmap = try {
@@ -119,41 +122,38 @@ internal class FrameDecoder {
 
         // Cache result and mark as decoded
         bitmap?.let {
-            imageCache.put(cacheKey, it)
-            synchronized(decodedKeysLock) {
-                decodedKeys.add(cacheKey)
-            }
+            synchronized(imageCacheLock) { imageCache[cacheKey] = it }
+            synchronized(decodedKeysLock) { decodedKeys.add(cacheKey) }
         }
 
         cacheKey to bitmap
     }
 
+    // MARK: - Cache Queries
+
     /**
      * Check if an image is fully decoded and ready to render.
      */
     fun isImageDecoded(key: String): Boolean {
-        return synchronized(decodedKeysLock) {
-            decodedKeys.contains(key)
-        }
+        return synchronized(decodedKeysLock) { decodedKeys.contains(key) }
     }
 
     /**
-     * Check if image exists in cache (may not be decoded yet).
+     * Check if image exists in cache.
      */
     fun hasImage(key: String): Boolean {
-        return imageCache.get(key) != null
+        return synchronized(imageCacheLock) { imageCache.containsKey(key) }
     }
 
     /**
      * Get cached image by key.
      */
     fun getImage(key: String): Bitmap? {
-        return imageCache.get(key)
+        return synchronized(imageCacheLock) { imageCache[key] }
     }
 
     /**
      * Check if first N frames are sequentially decoded and ready.
-     * Returns true only if frames 0 through minimumCount-1 are all ready.
      */
     fun areFirstFramesReady(keys: List<String>, minimumCount: Int): Boolean {
         val checkCount = minOf(keys.size, minimumCount)
@@ -164,7 +164,7 @@ internal class FrameDecoder {
             if (isImageDecoded(key)) {
                 readyCount++
             } else {
-                break  // Must be sequential - stop at first gap
+                break  // Must be sequential
             }
         }
 
@@ -175,8 +175,6 @@ internal class FrameDecoder {
 
     /**
      * Decode a batch of frames with full metadata preservation.
-     * Preserves coordinates, matchedSpriteFrameNumber, overlayId, etc.
-     * Supports both raw bytes (efficient) and base64 strings (fallback).
      */
     suspend fun decodeBatch(batch: FrameBatch): List<DecodedFrame> = withContext(Dispatchers.Default) {
         val decodedFrames = mutableListOf<DecodedFrame>()
@@ -185,13 +183,12 @@ internal class FrameDecoder {
 
         batch.frames.mapNotNull { frameData ->
             async {
-                // Check if we have any image data (bytes preferred, base64 fallback)
                 if (!frameData.hasImageData()) {
                     android.util.Log.w("FrameDecoder", "No imageData for seq=${frameData.sequenceIndex}")
                     return@async null
                 }
 
-                // Generate content-based cache key
+                // Content-based cache key (same sprite = same key across all chunks)
                 val cacheKey = frameData.overlayId
                     ?: if (frameData.animationName.isNotEmpty() && frameData.sheetFilename.isNotEmpty()) {
                         "${frameData.animationName}/${frameData.spriteIndexFolder}/${frameData.sheetFilename}"
@@ -199,8 +196,10 @@ internal class FrameDecoder {
                         "frame_${batch.chunkIndex}_${frameData.sequenceIndex}"
                     }
 
-                // Check cache first
-                imageCache.get(cacheKey)?.let { cached ->
+                // Check cache first (content dedup — same sprite already decoded = free)
+                synchronized(imageCacheLock) { imageCache[cacheKey] }?.let { cached ->
+                    // Still mark as decoded in case it was added by another path
+                    synchronized(decodedKeysLock) { decodedKeys.add(cacheKey) }
                     return@async DecodedFrame(
                         image = cached,
                         sequenceIndex = frameData.sequenceIndex,
@@ -215,9 +214,8 @@ internal class FrameDecoder {
                     )
                 }
 
-                // Decode bitmap - prefer raw bytes (skips base64 decode)
+                // Decode bitmap — prefer raw bytes (skips base64 decode)
                 val bitmap = if (frameData.imageBytes != null) {
-                    // Direct binary decode (efficient!)
                     try {
                         BitmapFactory.decodeByteArray(frameData.imageBytes, 0, frameData.imageBytes.size, options)
                     } catch (e: Exception) {
@@ -225,7 +223,6 @@ internal class FrameDecoder {
                         null
                     }
                 } else {
-                    // Base64 decode fallback
                     try {
                         val base64 = if (frameData.imageData.contains("base64,")) {
                             frameData.imageData.substringAfter("base64,")
@@ -245,11 +242,9 @@ internal class FrameDecoder {
                     return@async null
                 }
 
-                // Cache result
-                imageCache.put(cacheKey, bitmap)
-                synchronized(decodedKeysLock) {
-                    decodedKeys.add(cacheKey)
-                }
+                // Store in cache + mark decoded
+                synchronized(imageCacheLock) { imageCache[cacheKey] = bitmap }
+                synchronized(decodedKeysLock) { decodedKeys.add(cacheKey) }
 
                 DecodedFrame(
                     image = bitmap,
@@ -268,45 +263,34 @@ internal class FrameDecoder {
             decodedFrames.addAll(frames)
         }
 
-        // Sort by sequence index
         decodedFrames.sortedBy { it.sequenceIndex }
     }
 
     /**
      * Parse coordinates from backend format.
-     * Backend sends either per-frame [x, y, width, height] or chunk-level zone_top_left.
      */
     private fun parseCoordinates(coords: List<Float>?, zoneTopLeft: List<Int>?): RectF {
-        // Prefer per-frame coordinates
         if (coords != null && coords.size >= 4) {
-            return RectF(
-                coords[0],
-                coords[1],
-                coords[0] + coords[2],  // right = x + width
-                coords[1] + coords[3]   // bottom = y + height
-            )
+            return RectF(coords[0], coords[1], coords[0] + coords[2], coords[1] + coords[3])
         }
-
-        // Fallback to chunk-level zone_top_left with default size
         if (zoneTopLeft != null && zoneTopLeft.size >= 2) {
             val x = zoneTopLeft[0].toFloat()
             val y = zoneTopLeft[1].toFloat()
-            return RectF(x, y, x + 300f, y + 300f)  // Default 300x300 overlay size
+            return RectF(x, y, x + 300f, y + 300f)
         }
-
-        // No position data
         return RectF()
     }
 
+    // MARK: - Cache Management
+
     /**
-     * Clear all overlay frames from cache (called on new message).
+     * Clear all overlays (called on new message via forceIdleNow).
+     * This is the ONLY cleanup needed — no per-chunk eviction.
      */
     fun clearAllOverlays() {
-        imageCache.evictAll()
-        synchronized(decodedKeysLock) {
-            decodedKeys.clear()
-        }
-        android.util.Log.d("FrameDecoder", "Cleared all overlay caches and decoded keys")
+        synchronized(imageCacheLock) { imageCache.clear() }
+        synchronized(decodedKeysLock) { decodedKeys.clear() }
+        android.util.Log.d("FrameDecoder", "Cleared all overlays: cache and decoded keys")
     }
 
     /**
@@ -333,20 +317,18 @@ internal class FrameDecoder {
         allFrames.sortedBy { it.sequenceIndex }
     }
 
-    // MARK: - Cache Management
-
     /**
      * Clear the image cache.
      */
     fun clearCache() {
-        imageCache.evictAll()
+        clearAllOverlays()
     }
 
     /**
      * Handle memory pressure.
      */
     fun onLowMemory() {
-        clearCache()
+        clearAllOverlays()
     }
 
     /**
