@@ -1,3 +1,5 @@
+// @know entity LIVAClient_Android
+// @know flow USER_MESSAGE_FLOW
 package com.liva.animation.core
 
 import android.content.Context

@@ -1,3 +1,4 @@
+// @know entity BaseFrameManager_Android
 package com.liva.animation.rendering
 
 import android.content.Context

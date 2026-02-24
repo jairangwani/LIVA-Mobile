@@ -1,3 +1,4 @@
+// @know entity AudioSyncManager_Android
 package com.liva.animation.audio
 
 import com.liva.animation.rendering.AnimationEngine

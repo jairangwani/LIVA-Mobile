@@ -1,3 +1,4 @@
+// @know entity Configuration_Android
 package com.liva.animation.core
 
 /**

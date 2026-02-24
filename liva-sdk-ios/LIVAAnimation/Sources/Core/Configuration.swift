@@ -1,3 +1,4 @@
+// @know entity Configuration_iOS
 //
 //  Configuration.swift
 //  LIVAAnimation

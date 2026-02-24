@@ -1,3 +1,4 @@
+// @know entity LIVAAnimationTypes_iOS
 //
 //  LIVAAnimationTypes.swift
 //  LIVAAnimation

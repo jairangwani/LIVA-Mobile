@@ -1,3 +1,4 @@
+// @know entity FrameDecoder_iOS
 //
 //  FrameDecoder.swift
 //  LIVAAnimation

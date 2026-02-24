@@ -1,3 +1,4 @@
+// @know entity SocketManager_iOS
 //
 //  SocketManager.swift
 //  LIVAAnimation

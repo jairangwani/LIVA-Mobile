@@ -1,3 +1,4 @@
+// @know entity AgentConfig_iOS
 //
 //  AgentConfig.swift
 //  LIVAAnimation

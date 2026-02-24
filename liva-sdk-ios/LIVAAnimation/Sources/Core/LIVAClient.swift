@@ -1,3 +1,5 @@
+// @know entity LIVAClient_iOS
+// @know flow USER_MESSAGE_FLOW
 //
 //  LIVAClient.swift
 //  LIVAAnimation

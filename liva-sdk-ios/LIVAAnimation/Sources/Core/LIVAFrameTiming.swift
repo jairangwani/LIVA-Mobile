@@ -1,3 +1,4 @@
+// @know entity LIVAFrameTiming_iOS
 //
 //  LIVAFrameTiming.swift
 //  LIVAAnimation

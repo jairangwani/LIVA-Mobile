@@ -1,3 +1,4 @@
+// @know entity LIVAPerformanceTracker_iOS
 //
 //  LIVAPerformanceTracker.swift
 //  LIVAAnimation

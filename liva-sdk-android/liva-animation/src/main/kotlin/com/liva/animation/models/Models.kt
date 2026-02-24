@@ -1,3 +1,4 @@
+// @know entity Models_Android
 package com.liva.animation.models
 
 import android.graphics.Bitmap

@@ -1,3 +1,4 @@
+// @know entity SessionLogger_Android
 package com.liva.animation.logging
 
 import android.util.Log

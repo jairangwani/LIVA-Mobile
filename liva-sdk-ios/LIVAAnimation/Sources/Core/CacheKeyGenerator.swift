@@ -1,3 +1,4 @@
+// @know entity CacheKeyGenerator_iOS
 //
 //  CacheKeyGenerator.swift
 //  LIVAAnimation

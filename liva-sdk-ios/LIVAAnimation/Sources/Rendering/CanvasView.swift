@@ -1,3 +1,4 @@
+// @know entity CanvasView_iOS
 //
 //  CanvasView.swift
 //  LIVAAnimation

@@ -1,3 +1,4 @@
+// @know entity AnimationEngine_Android
 package com.liva.animation.rendering
 
 import android.graphics.Bitmap

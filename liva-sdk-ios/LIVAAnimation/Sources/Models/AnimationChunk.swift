@@ -1,3 +1,4 @@
+// @know entity AnimationChunk_iOS
 //
 //  AnimationChunk.swift
 //  LIVAAnimation

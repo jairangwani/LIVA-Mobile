@@ -1,3 +1,4 @@
+// @know entity BaseFrameManager_iOS
 //
 //  BaseFrameManager.swift
 //  LIVAAnimation

@@ -1,3 +1,5 @@
+// @know entity LIVAAnimationEngine_iOS
+// @know concept IOS_ASYNC_FRAME_PROCESSING
 //
 //  LIVAAnimationEngine.swift
 //  LIVAAnimation

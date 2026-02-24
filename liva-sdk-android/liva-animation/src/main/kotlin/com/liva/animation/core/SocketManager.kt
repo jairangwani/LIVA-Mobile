@@ -1,3 +1,4 @@
+// @know entity SocketManager_Android
 package com.liva.animation.core
 
 import android.util.Log

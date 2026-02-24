@@ -1,3 +1,4 @@
+// @know entity LIVALogger_iOS
 //
 //  LIVALogger.swift
 //  LIVAAnimation

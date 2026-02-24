@@ -1,3 +1,4 @@
+// @know entity Frame_iOS
 //
 //  Frame.swift
 //  LIVAAnimation

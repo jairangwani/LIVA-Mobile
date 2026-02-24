@@ -1,3 +1,4 @@
+// @know entity AudioPlayer_iOS
 //
 //  AudioPlayer.swift
 //  LIVAAnimation

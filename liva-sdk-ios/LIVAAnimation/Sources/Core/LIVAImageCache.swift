@@ -1,3 +1,5 @@
+// @know entity LIVAImageCache_iOS
+// @know concept IOS_ASYNC_FRAME_PROCESSING
 //
 //  LIVAImageCache.swift
 //  LIVAAnimation
